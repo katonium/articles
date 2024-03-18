@@ -22,9 +22,9 @@ create-article() {
 }
 
 preview() {
-    PORT="8000"
+    PORT="41282"
     echo "lanunch preview server with ${PORT} port"
-    npx zenn preview --port 8000 --open
+    npx zenn preview --port ${PORT} --open
 }
 
 "$@"
