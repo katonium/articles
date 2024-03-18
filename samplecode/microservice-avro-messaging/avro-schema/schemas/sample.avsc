@@ -1,0 +1,18 @@
+{
+ "type" : "record",
+ "name" : "SampleMessage",
+ "fields" : [
+   {
+     "name" : "StringField",
+     "type" : "string"
+   },
+   {
+     "name" : "FloatField",
+     "type" : "float"
+   },
+   {
+     "name" : "BooleanField",
+     "type" : "boolean"
+   }
+ ]
+}
