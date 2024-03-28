@@ -1,8 +1,8 @@
+#!/bin/bash
 
+PORT="41282"
 
-# 
 # https://zenn.dev/zenn/articles/connect-to-github
-# 
 install() {
     npm init --yes
     npm install zenn-cli
@@ -21,10 +21,16 @@ create-article() {
     npx zenn new:article --slug ${SLUG}
 }
 
+# launch zenn cli and preview it
 preview() {
-    PORT="41282"
     echo "lanunch preview server with ${PORT} port"
     npx zenn preview --port ${PORT} --open
+}
+
+# launch zenn cli without opening it
+start() {
+    echo "lanunch preview server with ${PORT} port"
+    npx zenn preview --port ${PORT}
 }
 
 "$@"

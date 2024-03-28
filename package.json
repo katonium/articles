@@ -17,8 +17,7 @@
   },
   "homepage": "https://github.com/katonium/zenn-articles#readme",
   "dependencies": {
-    "zenn-cli": "^0.1.151"
+    "zenn-cli": "^0.1.153"
   },
-  "devDependencies": {},
-  "description": ""
+  "description": "## Zenn CLI"
 }
