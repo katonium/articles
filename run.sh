@@ -7,6 +7,8 @@ install() {
     npm init --yes
     npm install zenn-cli
     npx zenn init
+    rm books/.keep
+    rm articles/.keep
 }
 
 update () {
