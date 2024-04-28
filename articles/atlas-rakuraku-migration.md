@@ -3,7 +3,7 @@ title: "Go製DBスキーマ管理ツールのAtlasを触ってみた"
 emoji: "🛸"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["atlas", "go", "mysql", "tech"]
-published: false
+published: true
 ---
 
 ## はじめに
@@ -36,7 +36,7 @@ https://gh.atlasgo.cloud/explore
 ### 1. マイグレーションファイルの管理がいらない
 
 Atlasはスキーマの理想状態を宣言的に管理することが出来、バージョン間の差分を積み重ねるマイグレーションの方式を取りません。
-そのため、マイグレーションファイルの管理を不要とし、管理が必要なのは理想状態のスキーマのみとなっています。
+そのため、マイグレーションファイル（バージョン間の差分のDDL）の管理を不要とし、管理が必要なのは理想状態のスキーマのみとなっています。
 
 またマイグレーションファイルを用いたバージョン管理にも対応しているので、マイグレーションファイルを用いてバージョンという形で状態を管理することもできます。
 
@@ -502,7 +502,7 @@ https://qiita.com/ganta/items/f3ba2cba775e228162f2
 
 
 #### 4. 自作ドライバでのスキーマ管理
-**External Schemas**という機能でGo等の別のツールをCLIから呼び出しスキーマの取得・変更を行うことが出来る様子です。
+**External Schemas**という機能でGo等の言語のORMと連携できる様子です。
 
 https://atlasgo.io/blog/2023/06/28/external-schemas-and-gorm-support
 
