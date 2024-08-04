@@ -1,5 +1,8 @@
 {
     "recommendations": [
+        "GitHub.copilot-chat",
+        "GitHub.copilot",
+        "task.vscode-task",
         "jebbs.plantuml"
     ]
 }

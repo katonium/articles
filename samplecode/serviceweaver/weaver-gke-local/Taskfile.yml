@@ -1,0 +1,55 @@
+# go install github.com/go-task/task/v3/cmd/task@latest
+version: '3'
+
+tasks:
+  setup:
+    desc: "setup service weaver and weaver-gke-local"
+    cmds:
+      - go install github.com/ServiceWeaver/weaver/cmd/weaver@latest
+      - go install github.com/ServiceWeaver/weaver-gke/cmd/weaver-gke-local@latest
+
+  init:
+    cmds:
+      - go mod init example.com/handson-serviceweaver-gke-local
+      - go get github.com/ServiceWeaver/weaver@latest 
+
+  update:
+    desc: "update dependencies"
+    cmds:
+      - go get -u github.com/ServiceWeaver/weaver@latest      
+
+  generate:
+    cmds:
+      - weaver generate .
+
+  build:
+    deps:
+      - task: generate
+    cmds:
+      - go build -o my-app .
+
+  deploy:
+    deps:
+      - task: build
+    cmds:
+      - weaver gke-local deploy weaver.toml
+
+  clean:
+    cmds:
+      - weaver gke-local kill --force my-app
+
+
+  clean-port:
+    deps:
+      - task: kill-process-using-port
+        vars: {PORT: 8080}
+      - task: kill-process-using-port
+        vars: {PORT: 8081}
+      - task: kill-process-using-port
+        vars: {PORT: 8082}
+      - task: kill-process-using-port
+        vars: {PORT: 8083}
+
+  kill-process-using-port:
+    cmds:
+      - kill -9 $(lsof -t -i:{{.PORT}})
