@@ -3,7 +3,7 @@ title: "slack-go/slackでfiles.upload APIのduplicateにようやく備えた"
 emoji: "🤥"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["slack", "go", "tech"]
-published: false
+published: true
 ---
 
 ## この記事について
@@ -70,6 +70,11 @@ func UploadFile_ToBe(ctx context.Context, slackToken string, chID string, file *
 	return f, err
 }
 ```
+
+作成したサンプルコードの全量はこちらに置いておきます
+
+https://github.com/katonium/articles/blob/zenn/main/samplecodes/slack-file-upload/main.go
+
 
 ## ...これだと便利すぎてなにが変わったのか全然わからない！
 
