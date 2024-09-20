@@ -1,6 +1,2 @@
-
-chrome::proxy() {
-    go run simple-http-proxy.go 
-}
-
-"$@"
+#!/bin/bash
+go run simple-http-proxy.go 
