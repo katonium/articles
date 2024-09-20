@@ -1,5 +1,5 @@
 ---
-title: ""
+title: "ServiceWeaverのコンセプトを活かしたCICDの在り方"
 emoji: "👏"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: []
