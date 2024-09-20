@@ -1,0 +1,32 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  PORT: 41282
+
+tasks:
+  setup:
+    desc: Setup workspace for zenn-cli
+    cmds:
+      - npm init --yes
+      - npm install zenn-cli
+      - npx zenn init
+      - rm books/.keep
+      - rm articles/.keep
+  update:
+    desc: Update zenn-cli
+    cmds:
+      - npm install zenn-cli@latest
+  new-article:
+    desc: Create article
+    cmds:
+      - npx zenn new:article --slug {{.CLI_ARGS}}
+  start-and-preview:
+    desc: Preview zenn-cli
+    cmds:
+      - npx zenn preview --port {{.PORT}} --open
+  start:
+    desc: Start zenn-cli
+    cmds:
+      - npx zenn preview --port {{.PORT}}

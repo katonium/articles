@@ -3,6 +3,7 @@
         "GitHub.copilot-chat",
         "GitHub.copilot",
         "task.vscode-task",
-        "jebbs.plantuml"
+        "jebbs.plantuml",
+        "github.vscode-github-actions",
     ]
 }
