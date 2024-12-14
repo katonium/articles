@@ -1,0 +1,29 @@
+{
+  "customizations": {
+    "codespaces": {
+      "repositories": {
+        "katonium/articles": {
+          "permissions": {
+            "contents": "write",
+            "pull_requests": "write"
+          },
+          "katonium/k8s-playground": {
+            "permissions": {
+              "contents": "write",
+              "pull_requests": "write"
+            }
+          }            
+        }
+      }
+    },
+    "vscode": {
+      "extensions": [
+        "GitHub.copilot-chat",
+        "GitHub.copilot",
+        "task.vscode-task",
+        "jebbs.plantuml"
+      ]
+    }
+  }
+}
+
