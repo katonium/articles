@@ -1,5 +1,5 @@
 ---
-title: "slack-go/slackでfiles.upload APIのduplicateにようやく備えた"
+title: "slack-go/slackでfiles.upload APIのdeprecationにようやく備えた"
 emoji: "🤥"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["slack", "go", "tech"]
