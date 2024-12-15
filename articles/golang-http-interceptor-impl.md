@@ -86,7 +86,7 @@ func (i *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error
 ```
 
 
-## 実装例①：429と503の際にリトライするインターセプター
+## 実装例②：429と503の際にリトライするインターセプター
 
 ※エクスポネンシャルバックオフではなく、線形にスリープ時間を増やしてリトライするインターセプターです。
 
