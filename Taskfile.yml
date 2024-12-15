@@ -6,6 +6,9 @@ vars:
   PORT: 41282
 
 tasks:
+  default:
+    cmds:
+      - task: start
   setup:
     desc: Setup workspace for zenn-cli
     cmds:
