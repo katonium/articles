@@ -12,6 +12,7 @@ Inspired by [gitmoji.dev](https://gitmoji.dev/) and  [GitCommitEmoji.md](https:/
 | Add books.                                             | :notebook_with_decorative_cover: `:notebook_with_decorative_cover:`  |
 | Fix articles and books.                                | :pencil2: `:pencil2:`   |
 | Publish articles or books.                             | :rocket: `:rocket:`    |
+| Add sample code.                                       | :tbd: `:tbd:`       |
 | Improve structure / format of the code.                | :art: `:art:`       |
 | Remove code or files.                                  | :fire: `:fire:`      |
 | Fix a bug.                                             | :bug: `:bug:`       |
