@@ -34,3 +34,7 @@ tasks:
     desc: Start zenn-cli
     cmds:
       - npx zenn preview --port {{.PORT}}
+  deploy:
+    desc: Deploy zenn article
+    cmds:
+      - git stash && git checkout zenn/main && git pull && git merge origin/main
