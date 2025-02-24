@@ -1,5 +1,5 @@
 ---
-title: "AIエージェントClineを進化させるMemory Bank"
+title: "AIエージェントClineを進化させるMemory Bankの「忘れる」というアイデア"
 emoji: "💾"
 type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["cline", "ai", "生成ai", "aiエージェント", "ポエム"]
