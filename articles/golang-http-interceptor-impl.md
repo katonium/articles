@@ -86,7 +86,7 @@ func (i *LoggingInterceptor) RoundTrip(req *http.Request) (*http.Response, error
 ```
 
 
-## 実装例①：429と503の際にリトライするインターセプター
+## 実装例②：429と503の際にリトライするインターセプター
 
 ※エクスポネンシャルバックオフではなく、線形にスリープ時間を増やしてリトライするインターセプターです。
 
@@ -147,7 +147,7 @@ func (i *RetryInterceptor) RoundTrip(req *http.Request) (*http.Response, error) 
 
 ## 記事を書いた後に気づいたこと
 
-「Go HTTP インターセプター」って調べると出ないけど「」って調べると先人の偉大な記事がいっぱい出てきたので、こちらもぜひご参照ください。
+「Go HTTP インターセプター」って調べると出ないけど「Go HTTP RoundTripper」って調べると先人の偉大な記事がいっぱい出てきたので、こちらもぜひご参照ください。
 
 https://zenn.dev/fujisawa33/articles/aef6d266aa751f
 
