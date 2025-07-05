@@ -3,7 +3,7 @@ title: "Claude CodeでCloud RunのWorker Poolを使ってセキュアで安価�
 emoji: "🤖"
 type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["ポエム", "cloudrun", "slack", "googlecloud"]
-published: false
+published: true
 ---
 
 ## はじめに
