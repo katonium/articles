@@ -3,7 +3,7 @@ title: "AI Agentはもはや『副操縦士』じゃない"
 emoji: "🧑‍✈️"
 type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["ai", "aiエージェント", "idea"]
-published: false
+published: true
 ---
 
 Molly Cantillonさんの `THE PERSONAL PANOPTICON` というポスト。
