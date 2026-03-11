@@ -3,3 +3,4 @@
 *.tfstate.backup
 terraform.tfvars
 .terraform.lock.hcl
+*.html

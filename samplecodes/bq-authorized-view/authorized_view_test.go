@@ -374,12 +374,14 @@ func TestAuthorizedView(t *testing.T) {
 // ══════════════════════════════════════════════
 // 承認済みデータセット（Authorized Dataset）のテスト
 //
-// 承認済みビューとの決定的な違い:
-//   - 承認済みビュー: ビュー単位で承認。編集者がソースデータへの権限を持つ必要がある。
-//   - 承認済みデータセット: データセット全体を承認。そのデータセット内なら
-//     誰でもビューを作成・編集してソースにアクセスできる。
+// 承認済みビューとの違い:
+//   - 承認済みビュー: ビュー単位で承認。新規ビューには個別の承認追加が必要。
+//   - 承認済みデータセット: データセット全体を承認。将来追加されるビューも自動的に承認される。
 //
-// このテストでは、承認済みデータセットのこの「広い信頼モデル」を検証する。
+// 共通の仕様:
+//   - どちらの方式でも、ビューを作成・編集するユーザーには参照先テーブルへの
+//     bigquery.tables.getData 権限が必要。承認済みデータセットは管理の利便性のための
+//     機能であり、ビュー作成者の権限チェックをバイパスするものではない。
 // ══════════════════════════════════════════════
 
 func TestAuthorizedDataset(t *testing.T) {
@@ -417,11 +419,11 @@ func TestAuthorizedDataset(t *testing.T) {
 			},
 		},
 		{
-			name: "正常系（承認済みビューとの違い）：user3がdataset_d内に新規ビューを作成してdataset_aを参照できること",
+			name: "異常系：新規ビュー作成 - user3がdataset_d内にdataset_aを参照するビューを作成できないこと",
 			run: func(t *testing.T) {
-				// 承認済みビューでは user2 の新規ビュー作成は 403 で拒否された。
-				// 承認済みデータセットでは、データセット全体が承認されているため、
-				// dataset_d 内に新しいビューを自由に作成して dataset_a を参照できる。
+				// 承認済みデータセットでも、ビュー作成者には参照先テーブルへの
+				// bigquery.tables.getData 権限が必要。user3 は dataset_a への権限を
+				// 持たないため、承認済みビューと同様に 403 で拒否される。
 				client := newImpersonatedClient(t, ctx, tf.ProjectID, tf.User3Email)
 				defer client.Close()
 
@@ -434,37 +436,41 @@ func TestAuthorizedDataset(t *testing.T) {
 				err := viewRef.Create(ctx, &bigquery.TableMetadata{
 					ViewQuery: newViewSQL,
 				})
-				if err != nil {
-					t.Fatalf("承認済みデータセット内でのビュー作成に失敗: %v", err)
-				}
-				defer func() {
-					if delErr := viewRef.Delete(ctx); delErr != nil {
-						t.Logf("テスト用ビューの削除に失敗: %v", delErr)
-					}
-				}()
 
-				// 作成したビューでクエリを実行（salary を含む全カラムが取得できる）
-				selectSQL := fmt.Sprintf(
-					"SELECT id, name, email, salary FROM `%s.%s.user3_created_view`",
-					tf.ProjectID, tf.DatasetD,
-				)
-				count, err := runQuery(ctx, client, selectSQL)
-				if err != nil {
-					t.Fatalf("新規作成ビューのクエリ実行に失敗: %v", err)
+				if err == nil {
+					defer func() {
+						if delErr := viewRef.Delete(ctx); delErr != nil {
+							t.Logf("テスト用ビューの削除に失敗: %v", delErr)
+						}
+					}()
+
+					selectSQL := fmt.Sprintf(
+						"SELECT * FROM `%s.%s.user3_created_view`",
+						tf.ProjectID, tf.DatasetD,
+					)
+					_, queryErr := runQuery(ctx, client, selectSQL)
+					if queryErr == nil {
+						t.Fatal("不正なビューの作成もクエリ実行も成功してしまいました（権限チェックが機能していません）")
+					}
+					if !isPermissionDenied(queryErr) {
+						t.Fatalf("クエリ実行時に期待されるエラーコード 403 ではありません: %v", queryErr)
+					}
+					t.Logf("ビュー作成は成功しましたが、クエリ実行時に 403 で拒否されました: %v", queryErr)
+					return
 				}
-				if count == 0 {
-					t.Error("新規作成ビューから0件のデータが返されました")
+
+				if !isPermissionDenied(err) {
+					t.Fatalf("期待されるエラーコード 403 ではありません: %v", err)
 				}
-				t.Logf("承認済みデータセット内で user3 が作成したビューから %d 件取得（salary含む全カラム）。"+
-					"承認済みビューとの重要な違い: データセット全体が信頼されているため、ビュー作成が可能", count)
+				t.Logf("期待通り 403 で拒否されました（承認済みデータセットでもビュー作成者の権限チェックは行われる）: %v", err)
 			},
 		},
 		{
-			name: "正常系（承認済みビューとの違い）：user3がdataset_d内のビューSQLを自由に変更できること",
+			name: "異常系：悪意のある更新 - user3がdataset_d内のビューSQLを変更できないこと",
 			run: func(t *testing.T) {
-				// 承認済みビューでは user2 がビューSQLを変更しようとすると 403 で拒否された。
-				// 承認済みデータセットでは、user3 は dataset_a への直接権限がなくても、
-				// dataset_d 内のビューSQLを自由に変更できる。
+				// 承認済みデータセットでも、ビュー更新者には参照先テーブルへの
+				// bigquery.tables.getData 権限が必要。承認済みビューと同様に、
+				// user3 は dataset_a への権限を持たないため 403 で拒否される。
 
 				// まず user1 でテスト用ビューを作成
 				adminClient := newImpersonatedClient(t, ctx, tf.ProjectID, tf.User1Email)
@@ -487,7 +493,7 @@ func TestAuthorizedDataset(t *testing.T) {
 					}
 				}()
 
-				// user3 でビューSQLを全カラム参照に変更（承認済みビューでは 403 になるパターン）
+				// user3 でビューSQLを全カラム参照に変更
 				user3Client := newImpersonatedClient(t, ctx, tf.ProjectID, tf.User3Email)
 				defer user3Client.Close()
 
@@ -505,24 +511,14 @@ func TestAuthorizedDataset(t *testing.T) {
 				_, err = user3ViewRef.Update(ctx, bigquery.TableMetadataToUpdate{
 					ViewQuery: expandedSQL,
 				}, meta.ETag)
-				if err != nil {
-					t.Fatalf("承認済みデータセット内でのビューSQL変更に失敗: %v（承認済みビューとは異なり成功するはず）", err)
-				}
 
-				// 変更後のビューで salary を含むクエリが成功することを確認
-				selectSQL := fmt.Sprintf(
-					"SELECT id, name, email, salary FROM `%s.%s.user3_editable_view`",
-					tf.ProjectID, tf.DatasetD,
-				)
-				count, err := runQuery(ctx, user3Client, selectSQL)
-				if err != nil {
-					t.Fatalf("変更後のビュークエリ実行に失敗: %v", err)
+				if err == nil {
+					t.Fatal("ビューの悪意ある更新が成功してしまいました（403が期待されます）")
 				}
-				if count == 0 {
-					t.Error("変更後のビューから0件のデータが返されました")
+				if !isPermissionDenied(err) {
+					t.Fatalf("期待されるエラーコード 403 ではありません: %v", err)
 				}
-				t.Logf("user3 がビューSQLを全カラム参照に変更し %d 件取得成功。"+
-					"承認済みビューでは 403 になる操作が、承認済みデータセットでは成功する", count)
+				t.Logf("期待通り 403 で拒否されました（承認済みデータセットでもビュー更新者の権限チェックは行われる）: %v", err)
 			},
 		},
 		{

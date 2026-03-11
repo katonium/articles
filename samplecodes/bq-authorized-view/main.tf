@@ -45,8 +45,26 @@ resource "google_service_account" "user2" {
   project      = var.project_id
 }
 
-# テスト実行者が user1, user2 に impersonate できるようにする
-# テスト実行者には roles/iam.serviceAccountTokenCreator が必要（プロジェクトレベルで付与済みの想定）
+# テスト実行者（Terraform 実行者）が user1, user2, user3 に impersonate できるようにする
+data "google_client_openid_userinfo" "me" {}
+
+resource "google_service_account_iam_member" "impersonate_user1" {
+  service_account_id = google_service_account.user1.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${data.google_client_openid_userinfo.me.email}"
+}
+
+resource "google_service_account_iam_member" "impersonate_user2" {
+  service_account_id = google_service_account.user2.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${data.google_client_openid_userinfo.me.email}"
+}
+
+resource "google_service_account_iam_member" "impersonate_user3" {
+  service_account_id = google_service_account.user3.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "user:${data.google_client_openid_userinfo.me.email}"
+}
 
 # ──────────────────────────────────────────────
 # Dataset A: 機密データ（元データ）
