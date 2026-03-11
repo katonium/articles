@@ -37,3 +37,23 @@ output "user2_email" {
 output "suffix" {
   value = local.suffix
 }
+
+output "dataset_d_id" {
+  value = google_bigquery_dataset.dataset_d.dataset_id
+}
+
+output "dataset_e_id" {
+  value = google_bigquery_dataset.dataset_e.dataset_id
+}
+
+output "view_ds_public_directory_id" {
+  value = google_bigquery_table.authorized_dataset_view.table_id
+}
+
+output "view_ds_nested_directory_id" {
+  value = google_bigquery_table.nested_authorized_dataset_view.table_id
+}
+
+output "user3_email" {
+  value = google_service_account.user3.email
+}
