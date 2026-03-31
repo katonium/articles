@@ -3,7 +3,7 @@ title: "シェル開きすぎて迷子になったのでClaude Codeに教えて�
 emoji: "☁️"
 type: "idea" # tech: 技術記事 / idea: アイデア
 topics: ["ai", "aiエージェント", "claudecode"]
-published: false
+published: true
 ---
 
 Vibe Codingのために複数シェルを開いて並行開発をしていたらどこでなにをやっているのか完全にわからなくなってしまったので、Claude Codeに教えてもらいました。
@@ -95,16 +95,20 @@ Follow with the task list details if tasks exist.
 
 ## 使ってみたい人向け
 
-ここに置きました。
+[SKILL.md](https://github.com/katonium/articles/blob/zenn/main/.claude/skills/where-you-are/SKILL.md)をGitHubに置きました。これをいい感じにコピペしてもらえればと思います。
 
+Claude Codeに下記のように頼むとやってくれると思います。（たぶん。未検証です。）
 
-
-Claude Codeに下記のように頼むと
+```
+`/where-you-are` スキルをこのワークスペースで利用できるようにしてください。
+下記のリンクのSKILL.mdを参考に、現在の作業状況をまとめて報告するスキルを作成してください。
+https://github.com/katonium/articles/blob/zenn/main/.claude/skills/where-you-are/SKILL.md
+```
 
 
 ## まとめ
 
-完全にVibeで作成したSkillなので改善点はめちゃくちゃあると思うのですが、頭のリソースを割かずに今の状況を把握できるようになったので、かなり助かっています。
+完全にVibeで作成したSkillなので改善点はかなりあると思うのですが、頭のリソースを割かずに今の状況を把握できるようになったので、かなり助かっています。
 
 1. 繰り返し作業はSKILLにすることを意識する
 2. 自分のリソースは有限なので、単純作業は極力AIに任せて、スケール可能な方法があればそちらを選ぶ
