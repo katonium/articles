@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/.claude/settings.schema.json",
+  "_comment": [
+    "このファイルをプロジェクトの .claude/settings.json にコピーして使う。",
+    "HOOK_LOGGER_PATH は hook_logger.sh の絶対パスに置換すること。"
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "HOOK_LOGGER_PATH"
+      }
+    ]
+  }
+}
