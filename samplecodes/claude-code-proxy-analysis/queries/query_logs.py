@@ -1,208 +1,223 @@
 #!/usr/bin/env python3
 """
-Claude Code通信ログ クエリツール
+Claude Code通信ログ クエリツール（DuckDB + JSONL版）
 
-mitmproxyのSQLiteログとフックのSQLiteログを横断的にクエリする。
-Cloud Logging風の柔軟なクエリを目指す。
+mitmproxyとフックロガーが書き出したJSONLファイルをDuckDBで横断的に分析する。
+データは全てJSONLファイル。DuckDBのread_json_auto()で直接クエリ。
+
+ログディレクトリ構成:
+    logs/
+    ├── requests.jsonl      # mitmproxy: APIリクエスト
+    ├── responses.jsonl     # mitmproxy: APIレスポンス
+    ├── sse_events.jsonl    # mitmproxy: SSEイベント（パース済み）
+    ├── tool_calls.jsonl    # mitmproxy: tool_use / tool_result
+    ├── sessions.jsonl      # mitmproxy: セッション検出
+    └── hooks.jsonl         # フックロガー: フックイベント
 
 Usage:
-    # 全リクエストの概要
-    python query_logs.py summary
-
-    # ツール呼び出し一覧
-    python query_logs.py tools
-
-    # セッション一覧（サブエージェント検出）
-    python query_logs.py sessions
-
-    # システムプロンプトの抽出
-    python query_logs.py system-prompt [flow_id]
-
-    # 特定ツールの呼び出し詳細
-    python query_logs.py tool-detail <tool_name>
-
-    # SSEイベントの時系列
-    python query_logs.py sse-timeline [flow_id]
-
-    # フックイベント一覧
-    python query_logs.py hooks
-
-    # トークン使用量サマリー
-    python query_logs.py tokens
-
-    # 通信タイムライン（プロキシ+フック統合）
-    python query_logs.py timeline
-
-    # カスタムSQL
-    python query_logs.py sql "SELECT * FROM requests WHERE model LIKE '%opus%'"
-
-    # CLAUDE.mdの内容を抽出
-    python query_logs.py claude-md
-
-    # ツール定義一覧を抽出
-    python query_logs.py tool-definitions [flow_id]
+    python query_logs.py summary              # 全リクエスト概要
+    python query_logs.py tools                # ツール呼び出し一覧
+    python query_logs.py tool-ranking         # ツール頻度ランキング
+    python query_logs.py sessions             # セッション一覧
+    python query_logs.py session-diff         # セッション間ツール差分
+    python query_logs.py system-prompt [fid]  # システムプロンプト抽出
+    python query_logs.py tool-definitions [fid]  # ツール定義一覧
+    python query_logs.py sse-timeline [fid]   # SSEイベント時系列
+    python query_logs.py hooks                # フックイベント一覧
+    python query_logs.py tokens               # トークン使用量
+    python query_logs.py cache-analysis       # Prompt Caching効果
+    python query_logs.py timeline             # 統合タイムライン
+    python query_logs.py claude-md            # CLAUDE.md抽出
+    python query_logs.py sql "SELECT ..."     # カスタムSQL
+    python query_logs.py export [dir]         # Parquet出力
 """
 
 import argparse
 import json
-import sqlite3
 import sys
 from pathlib import Path
-from datetime import datetime
+
+try:
+    import duckdb
+except ImportError:
+    print("DuckDB is required:")
+    print("  pip install duckdb")
+    sys.exit(1)
 
 
 # デフォルトパス
-DEFAULT_PROXY_DB = Path(__file__).parent.parent / "logs" / "claude_traffic.db"
-DEFAULT_HOOK_DB = Path(__file__).parent.parent / "logs" / "hooks.db"
+BASE_DIR = Path(__file__).parent.parent
+DEFAULT_LOG_DIR = BASE_DIR / "logs"
+
+# JONLファイル名 → ビュー名のマッピング
+JSONL_FILES = {
+    "requests":   "requests.jsonl",
+    "responses":  "responses.jsonl",
+    "sse_events": "sse_events.jsonl",
+    "tool_calls": "tool_calls.jsonl",
+    "sessions":   "sessions.jsonl",
+    "hooks":      "hooks.jsonl",
+}
 
 
-def connect(db_path: Path) -> sqlite3.Connection | None:
-    if not db_path.exists():
-        return None
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+def create_connection(log_dir: Path) -> duckdb.DuckDBPyConnection:
+    """DuckDBコネクションを作成し、存在するJSONLファイルをビューとして登録する"""
+    conn = duckdb.connect()
+
+    for view_name, filename in JSONL_FILES.items():
+        filepath = log_dir / filename
+        if filepath.exists() and filepath.stat().st_size > 0:
+            conn.execute(f"""
+                CREATE VIEW {view_name} AS
+                SELECT * FROM read_json_auto('{filepath}', format='newline_delimited')
+            """)
+
     return conn
 
 
-def fmt_size(n: int | None) -> str:
-    if n is None:
-        return "-"
-    if n < 1024:
-        return f"{n}B"
-    if n < 1024 * 1024:
-        return f"{n/1024:.1f}KB"
-    return f"{n/1024/1024:.1f}MB"
-
-
-def fmt_ts(ts: str | None) -> str:
-    if not ts:
-        return "-"
+def has_view(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
+    """ビューが存在するか確認"""
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.strftime("%H:%M:%S.%f")[:-3]
+        conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
+        return True
     except Exception:
-        return ts[:12]
+        return False
 
 
-def print_table(headers: list[str], rows: list[list]):
-    if not rows:
-        print("(no results)")
-        return
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-
-    header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-    print(header_line)
-    print("-+-".join("-" * w for w in widths))
-    for row in rows:
-        print(" | ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)))
+def print_result(conn: duckdb.DuckDBPyConnection, query: str, params=None):
+    """クエリ結果を整形して出力"""
+    try:
+        result = conn.execute(query, params or [])
+        df = result.fetchdf()
+        if df.empty:
+            print("(no results)")
+            return
+        print(df.to_string(index=False, max_colwidth=60))
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 # ─── コマンド実装 ───
 
-def cmd_summary(proxy_db, hook_db):
-    """全リクエストの概要"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_summary(conn):
+    if not has_view(conn, "requests"):
+        print("requests.jsonl not found"); return
 
-    rows = proxy_db.execute("""
+    join = "LEFT JOIN responses resp ON r.flow_id = resp.flow_id" if has_view(conn, "responses") else ""
+    resp_cols = """
+        COALESCE(resp.status_code::VARCHAR, '-') AS status,
+        COALESCE(resp.input_tokens::VARCHAR, '-') AS in_tok,
+        COALESCE(resp.output_tokens::VARCHAR, '-') AS out_tok,
+        COALESCE(resp.cache_read_input_tokens::VARCHAR, '-') AS cache_read
+    """ if has_view(conn, "responses") else """
+        '-' AS status, '-' AS in_tok, '-' AS out_tok, '-' AS cache_read
+    """
+
+    print_result(conn, f"""
         SELECT
-            r.flow_id,
-            r.timestamp,
-            r.model,
-            r.tools_count,
-            r.messages_count,
-            r.system_prompt_size,
-            r.has_thinking,
-            r.has_claude_md,
-            r.body_size,
-            resp.status_code,
-            resp.input_tokens,
-            resp.output_tokens,
-            resp.cache_read_input_tokens
+            strftime(r.timestamp::TIMESTAMP, '%H:%M:%S') AS time,
+            r.flow_id[:8] AS flow,
+            COALESCE(r.model, '-')[-20:] AS model,
+            COALESCE(r.tools_count::VARCHAR, '-') AS tools,
+            COALESCE(r.messages_count::VARCHAR, '-') AS msgs,
+            CASE
+                WHEN r.system_prompt_size IS NULL THEN '-'
+                WHEN r.system_prompt_size < 1024 THEN r.system_prompt_size::VARCHAR || 'B'
+                ELSE (r.system_prompt_size / 1024)::VARCHAR || 'KB'
+            END AS sys_size,
+            CASE WHEN r.has_thinking THEN 'Y' ELSE 'N' END AS think,
+            CASE WHEN r.has_claude_md THEN 'Y' ELSE 'N' END AS claude_md,
+            (r.body_size / 1024)::VARCHAR || 'KB' AS req_size,
+            {resp_cols}
         FROM requests r
-        LEFT JOIN responses resp ON r.flow_id = resp.flow_id
+        {join}
         ORDER BY r.timestamp
-    """).fetchall()
-
-    print_table(
-        ["Time", "Flow", "Model", "Tools", "Msgs", "SysSize", "Think", "CLAUDE.md",
-         "ReqSize", "Status", "InTok", "OutTok", "CacheRead"],
-        [[
-            fmt_ts(r["timestamp"]), r["flow_id"][:8],
-            (r["model"] or "-")[-20:], r["tools_count"] or "-",
-            r["messages_count"] or "-", fmt_size(r["system_prompt_size"]),
-            "Y" if r["has_thinking"] else "N",
-            "Y" if r["has_claude_md"] else "N",
-            fmt_size(r["body_size"]), r["status_code"] or "-",
-            r["input_tokens"] or "-", r["output_tokens"] or "-",
-            r["cache_read_input_tokens"] or "-",
-        ] for r in rows]
-    )
+    """)
 
 
-def cmd_tools(proxy_db, hook_db):
-    """ツール呼び出し一覧"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_tools(conn):
+    if not has_view(conn, "tool_calls"):
+        print("tool_calls.jsonl not found"); return
 
-    rows = proxy_db.execute("""
-        SELECT timestamp, direction, tool_name, tool_use_id, tool_input, tool_result, is_error
+    print_result(conn, """
+        SELECT
+            strftime(timestamp::TIMESTAMP, '%H:%M:%S.%g') AS time,
+            CASE direction WHEN 'response' THEN '-> use' ELSE '<- result' END AS dir,
+            COALESCE(tool_name, '-') AS tool,
+            COALESCE(tool_use_id[:12], '-') AS id,
+            COALESCE(tool_input, tool_result, '-')[:60] AS preview,
+            CASE WHEN is_error THEN '!' ELSE '' END AS err
         FROM tool_calls
         ORDER BY timestamp
-    """).fetchall()
-
-    print_table(
-        ["Time", "Dir", "Tool", "ID", "Input/Result (preview)", "Err"],
-        [[
-            fmt_ts(r["timestamp"]),
-            "→" if r["direction"] == "response" else "←",
-            r["tool_name"] or "-",
-            (r["tool_use_id"] or "-")[:12],
-            (r["tool_input"] or r["tool_result"] or "-")[:60],
-            "!" if r["is_error"] else "",
-        ] for r in rows]
-    )
+    """)
 
 
-def cmd_sessions(proxy_db, hook_db):
-    """セッション一覧（サブエージェント検出）"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_tool_ranking(conn):
+    if not has_view(conn, "tool_calls"):
+        print("tool_calls.jsonl not found"); return
 
-    rows = proxy_db.execute("""
-        SELECT timestamp, session_type, model, system_prompt_hash, tools_hash,
-            (SELECT COUNT(*) FROM requests WHERE requests.flow_id >= sessions.flow_id) as req_count
+    print_result(conn, """
+        SELECT
+            COALESCE(tool_name, '(unknown)') AS tool,
+            COUNT(*) FILTER (WHERE direction = 'response') AS calls,
+            COUNT(*) FILTER (WHERE is_error) AS errors,
+            MIN(strftime(timestamp::TIMESTAMP, '%H:%M:%S')) AS first,
+            MAX(strftime(timestamp::TIMESTAMP, '%H:%M:%S')) AS last
+        FROM tool_calls
+        GROUP BY tool_name
+        ORDER BY calls DESC
+    """)
+
+
+def cmd_sessions(conn):
+    if not has_view(conn, "sessions"):
+        print("sessions.jsonl not found"); return
+
+    print_result(conn, """
+        SELECT
+            strftime(timestamp::TIMESTAMP, '%H:%M:%S') AS time,
+            session_type AS type,
+            COALESCE(model, '-')[-20:] AS model,
+            system_prompt_hash AS sys_hash,
+            tools_hash
         FROM sessions
         ORDER BY timestamp
+    """)
+
+
+def cmd_session_diff(conn):
+    if not has_view(conn, "sessions"):
+        print("sessions.jsonl not found"); return
+
+    rows = conn.execute("""
+        SELECT session_type, system_prompt_hash, tools_names
+        FROM sessions ORDER BY timestamp
     """).fetchall()
 
-    print_table(
-        ["Time", "Type", "Model", "SysHash", "ToolsHash", "Reqs"],
-        [[
-            fmt_ts(r["timestamp"]), r["session_type"], (r["model"] or "-")[-20:],
-            r["system_prompt_hash"] or "-", r["tools_hash"] or "-", r["req_count"],
-        ] for r in rows]
-    )
+    for session_type, sys_hash, tools_names in rows:
+        names = tools_names if isinstance(tools_names, list) else []
+        print(f"\n{'='*60}")
+        print(f"Session: {session_type} (sys_hash={sys_hash})")
+        print(f"Tools ({len(names)}): {', '.join(sorted(names))}")
 
 
-def cmd_system_prompt(proxy_db, hook_db, flow_id=None):
-    """システムプロンプトの抽出"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_system_prompt(conn, flow_id=None):
+    if not has_view(conn, "requests"):
+        print("requests.jsonl not found"); return
 
     if flow_id:
-        row = proxy_db.execute("SELECT body FROM requests WHERE flow_id LIKE ?", (f"{flow_id}%",)).fetchone()
+        row = conn.execute(
+            "SELECT body FROM requests WHERE flow_id LIKE ? LIMIT 1",
+            [f"{flow_id}%"]
+        ).fetchone()
     else:
-        row = proxy_db.execute("SELECT body FROM requests ORDER BY timestamp LIMIT 1").fetchone()
+        row = conn.execute("SELECT body FROM requests ORDER BY timestamp LIMIT 1").fetchone()
 
-    if not row or not row["body"]:
+    if not row or not row[0]:
         print("No request body found"); return
 
     try:
-        data = json.loads(row["body"])
+        data = json.loads(row[0])
         system = data.get("system")
         if system:
             print(json.dumps(system, indent=2, ensure_ascii=False))
@@ -212,21 +227,23 @@ def cmd_system_prompt(proxy_db, hook_db, flow_id=None):
         print("Failed to parse request body")
 
 
-def cmd_tool_definitions(proxy_db, hook_db, flow_id=None):
-    """ツール定義一覧の抽出"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_tool_definitions(conn, flow_id=None):
+    if not has_view(conn, "requests"):
+        print("requests.jsonl not found"); return
 
     if flow_id:
-        row = proxy_db.execute("SELECT body FROM requests WHERE flow_id LIKE ?", (f"{flow_id}%",)).fetchone()
+        row = conn.execute(
+            "SELECT body FROM requests WHERE flow_id LIKE ? LIMIT 1",
+            [f"{flow_id}%"]
+        ).fetchone()
     else:
-        row = proxy_db.execute("SELECT body FROM requests ORDER BY timestamp LIMIT 1").fetchone()
+        row = conn.execute("SELECT body FROM requests ORDER BY timestamp LIMIT 1").fetchone()
 
-    if not row or not row["body"]:
+    if not row or not row[0]:
         print("No request body found"); return
 
     try:
-        data = json.loads(row["body"])
+        data = json.loads(row[0])
         tools = data.get("tools", [])
         print(f"Total tools: {len(tools)}\n")
         for i, tool in enumerate(tools):
@@ -241,196 +258,240 @@ def cmd_tool_definitions(proxy_db, hook_db, flow_id=None):
         print("Failed to parse request body")
 
 
-def cmd_claude_md(proxy_db, hook_db):
-    """CLAUDE.mdの内容を探す"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_claude_md(conn):
+    if not has_view(conn, "requests"):
+        print("requests.jsonl not found"); return
 
-    rows = proxy_db.execute(
-        "SELECT flow_id, body FROM requests WHERE has_claude_md = 1 ORDER BY timestamp LIMIT 1"
-    ).fetchall()
+    row = conn.execute(
+        "SELECT flow_id, body FROM requests WHERE has_claude_md = true ORDER BY timestamp LIMIT 1"
+    ).fetchone()
 
-    if not rows:
+    if not row:
         print("No CLAUDE.md content found in requests"); return
 
-    for row in rows:
-        try:
-            data = json.loads(row["body"])
-            # systemプロンプト内を探す
-            system = data.get("system", "")
-            if isinstance(system, list):
-                for block in system:
-                    text = block.get("text", "") if isinstance(block, dict) else str(block)
-                    if "CLAUDE.md" in text or "claude.md" in text.lower():
-                        print(f"=== Found in system prompt (flow={row['flow_id'][:8]}) ===")
-                        print(text[:3000])
-                        print("...")
-                        return
-
-            # メッセージ内を探す
-            for msg in data.get("messages", []):
-                content = msg.get("content", "")
-                content_str = json.dumps(content) if not isinstance(content, str) else content
-                if "CLAUDE.md" in content_str:
-                    print(f"=== Found in messages (flow={row['flow_id'][:8]}, role={msg.get('role')}) ===")
-                    print(content_str[:3000])
-                    print("...")
+    flow_id, body = row
+    try:
+        data = json.loads(body)
+        system = data.get("system", "")
+        if isinstance(system, list):
+            for block in system:
+                text = block.get("text", "") if isinstance(block, dict) else str(block)
+                if "CLAUDE.md" in text or "claude.md" in text.lower():
+                    print(f"=== Found in system prompt (flow={flow_id[:8]}) ===")
+                    print(text[:5000])
                     return
-        except json.JSONDecodeError:
-            pass
+
+        for msg in data.get("messages", []):
+            content = msg.get("content", "")
+            content_str = json.dumps(content, ensure_ascii=False) if not isinstance(content, str) else content
+            if "CLAUDE.md" in content_str:
+                print(f"=== Found in messages (flow={flow_id[:8]}, role={msg.get('role')}) ===")
+                print(content_str[:5000])
+                return
+    except json.JSONDecodeError:
+        pass
 
 
-def cmd_sse_timeline(proxy_db, hook_db, flow_id=None):
-    """SSEイベントの時系列"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
+def cmd_sse_timeline(conn, flow_id=None):
+    if not has_view(conn, "sse_events"):
+        print("sse_events.jsonl not found"); return
 
-    if flow_id:
-        rows = proxy_db.execute(
-            "SELECT * FROM sse_events WHERE flow_id LIKE ? ORDER BY event_index",
-            (f"{flow_id}%",)
-        ).fetchall()
-    else:
-        rows = proxy_db.execute(
-            "SELECT * FROM sse_events ORDER BY timestamp, event_index LIMIT 200"
-        ).fetchall()
+    where = f"WHERE flow_id LIKE '{flow_id}%'" if flow_id else ""
+    limit = "" if flow_id else "LIMIT 200"
 
-    print_table(
-        ["Time", "Flow", "#", "EventType", "ContentType", "Tool", "Preview"],
-        [[
-            fmt_ts(r["timestamp"]), r["flow_id"][:8], r["event_index"],
-            r["event_type"], r["content_type"] or "-",
-            r["tool_name"] or "-", (r["text_preview"] or "-")[:50],
-        ] for r in rows]
-    )
-
-
-def cmd_hooks(proxy_db, hook_db):
-    """フックイベント一覧"""
-    if not hook_db:
-        print("Hook DB not found"); return
-
-    rows = hook_db.execute(
-        "SELECT * FROM hook_events ORDER BY timestamp"
-    ).fetchall()
-
-    print_table(
-        ["Time", "Event", "Session", "Tool", "Error"],
-        [[
-            fmt_ts(r["timestamp"]), r["event"], (r["session_id"] or "-")[:12],
-            r["tool_name"] or "-", r["is_error"] or "-",
-        ] for r in rows]
-    )
-
-
-def cmd_tokens(proxy_db, hook_db):
-    """トークン使用量サマリー"""
-    if not proxy_db:
-        print("Proxy DB not found"); return
-
-    rows = proxy_db.execute("""
+    print_result(conn, f"""
         SELECT
-            r.model,
-            COUNT(*) as requests,
-            SUM(resp.input_tokens) as total_input,
-            SUM(resp.output_tokens) as total_output,
-            SUM(resp.cache_creation_input_tokens) as total_cache_create,
-            SUM(resp.cache_read_input_tokens) as total_cache_read
+            strftime(timestamp::TIMESTAMP, '%H:%M:%S.%g') AS time,
+            flow_id[:8] AS flow,
+            event_index AS idx,
+            event_type,
+            COALESCE(content_type, '-') AS ctype,
+            COALESCE(tool_name, '-') AS tool,
+            COALESCE(text_preview, '-')[:50] AS preview
+        FROM sse_events
+        {where}
+        ORDER BY timestamp, event_index
+        {limit}
+    """)
+
+
+def cmd_hooks(conn):
+    if not has_view(conn, "hooks"):
+        print("hooks.jsonl not found"); return
+
+    print_result(conn, """
+        SELECT
+            timestamp[:19] AS time,
+            event,
+            COALESCE(session_id[:12], '-') AS session,
+            COALESCE(tool_name, '-') AS tool,
+            COALESCE(is_error::VARCHAR, '-') AS error
+        FROM hooks
+        ORDER BY timestamp
+    """)
+
+
+def cmd_tokens(conn):
+    if not has_view(conn, "requests") or not has_view(conn, "responses"):
+        print("requests.jsonl / responses.jsonl not found"); return
+
+    print_result(conn, """
+        SELECT
+            COALESCE(r.model, '-')[-25:] AS model,
+            COUNT(*) AS reqs,
+            SUM(resp.input_tokens) AS input,
+            SUM(resp.output_tokens) AS output,
+            SUM(resp.cache_creation_input_tokens) AS cache_new,
+            SUM(resp.cache_read_input_tokens) AS cache_hit,
+            ROUND(
+                COALESCE(SUM(resp.input_tokens), 0) * 3.0 / 1e6 +
+                COALESCE(SUM(resp.output_tokens), 0) * 15.0 / 1e6 +
+                COALESCE(SUM(resp.cache_read_input_tokens), 0) * 0.3 / 1e6,
+                4
+            ) AS est_cost_usd
         FROM requests r
         LEFT JOIN responses resp ON r.flow_id = resp.flow_id
         GROUP BY r.model
-    """).fetchall()
-
-    print_table(
-        ["Model", "Requests", "InputTok", "OutputTok", "CacheCreate", "CacheRead"],
-        [[
-            (r["model"] or "-")[-25:], r["requests"],
-            r["total_input"] or "-", r["total_output"] or "-",
-            r["total_cache_create"] or "-", r["total_cache_read"] or "-",
-        ] for r in rows]
-    )
+    """)
 
 
-def cmd_timeline(proxy_db, hook_db):
-    """通信タイムライン（プロキシ+フック統合）"""
-    events = []
+def cmd_cache_analysis(conn):
+    if not has_view(conn, "requests") or not has_view(conn, "responses"):
+        print("requests.jsonl / responses.jsonl not found"); return
 
-    if proxy_db:
-        for r in proxy_db.execute("SELECT timestamp, 'REQ' as type, model, tools_count, messages_count FROM requests").fetchall():
-            events.append((r["timestamp"], "⬆️  REQ", f"model={r['model']} tools={r['tools_count']} msgs={r['messages_count']}"))
-        for r in proxy_db.execute("SELECT timestamp, direction, tool_name, tool_use_id FROM tool_calls").fetchall():
-            icon = "🔨 TOOL→" if r["direction"] == "response" else "🔧 ←RESULT"
-            events.append((r["timestamp"], icon, f"{r['tool_name'] or '?'} id={r['tool_use_id'][:12] if r['tool_use_id'] else '?'}"))
+    print_result(conn, """
+        SELECT
+            strftime(r.timestamp::TIMESTAMP, '%H:%M:%S') AS time,
+            r.flow_id[:8] AS flow,
+            r.messages_count AS msgs,
+            (r.body_size / 1024)::VARCHAR || 'KB' AS req_size,
+            COALESCE(resp.input_tokens, 0) AS input,
+            COALESCE(resp.cache_creation_input_tokens, 0) AS cache_new,
+            COALESCE(resp.cache_read_input_tokens, 0) AS cache_hit,
+            CASE
+                WHEN COALESCE(resp.input_tokens, 0) + COALESCE(resp.cache_read_input_tokens, 0) = 0 THEN '-'
+                ELSE ROUND(
+                    COALESCE(resp.cache_read_input_tokens, 0) * 100.0 /
+                    (COALESCE(resp.input_tokens, 0) + COALESCE(resp.cache_read_input_tokens, 0)),
+                    1
+                )::VARCHAR || '%'
+            END AS hit_rate
+        FROM requests r
+        LEFT JOIN responses resp ON r.flow_id = resp.flow_id
+        ORDER BY r.timestamp
+    """)
 
-    if hook_db:
-        for r in hook_db.execute("SELECT timestamp, event, tool_name FROM hook_events").fetchall():
-            events.append((r["timestamp"], f"🪝 {r['event']}", r["tool_name"] or ""))
 
-    events.sort(key=lambda x: x[0])
+def cmd_timeline(conn):
+    parts = []
 
-    print_table(
-        ["Time", "Type", "Detail"],
-        [[fmt_ts(e[0]), e[1], e[2][:80]] for e in events]
-    )
+    if has_view(conn, "requests"):
+        parts.append("""
+            SELECT timestamp, '>> REQ' AS type,
+                'model=' || COALESCE(model, '?') || ' tools=' || COALESCE(tools_count::VARCHAR, '?') ||
+                ' msgs=' || COALESCE(messages_count::VARCHAR, '?') AS detail
+            FROM requests
+        """)
+
+    if has_view(conn, "tool_calls"):
+        parts.append("""
+            SELECT timestamp,
+                CASE direction WHEN 'response' THEN '.. TOOL>' ELSE '.. <RESULT' END AS type,
+                COALESCE(tool_name, '?') || ' id=' || COALESCE(tool_use_id[:12], '?') AS detail
+            FROM tool_calls
+        """)
+
+    if has_view(conn, "hooks"):
+        parts.append("""
+            SELECT timestamp, '** HOOK' AS type,
+                event || ' ' || COALESCE(tool_name, '') AS detail
+            FROM hooks
+        """)
+
+    if not parts:
+        print("No data sources found"); return
+
+    query = " UNION ALL ".join(parts)
+    print_result(conn, f"""
+        SELECT
+            strftime(timestamp::TIMESTAMP, '%H:%M:%S.%g') AS time,
+            type,
+            detail[:80] AS detail
+        FROM ({query})
+        ORDER BY timestamp
+    """)
 
 
-def cmd_sql(proxy_db, hook_db, query: str):
-    """カスタムSQL実行"""
-    db = proxy_db or hook_db
-    if not db:
-        print("No DB found"); return
+def cmd_sql(conn, query: str):
+    print_result(conn, query)
 
-    try:
-        rows = db.execute(query).fetchall()
-        if not rows:
-            print("(no results)"); return
-        headers = rows[0].keys()
-        print_table(
-            list(headers),
-            [[str(r[h])[:60] for h in headers] for r in rows]
-        )
-    except sqlite3.Error as e:
-        print(f"SQL Error: {e}")
+
+def cmd_export(conn, output_dir: str = None):
+    out = Path(output_dir) if output_dir else DEFAULT_LOG_DIR / "export"
+    out.mkdir(parents=True, exist_ok=True)
+
+    for view_name in JSONL_FILES:
+        if not has_view(conn, view_name):
+            continue
+        path = out / f"{view_name}.parquet"
+        try:
+            conn.execute(f"COPY {view_name} TO '{path}' (FORMAT PARQUET)")
+            count = conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+            print(f"  {path.name}: {count} rows")
+        except Exception as e:
+            print(f"  {view_name}.parquet: Error - {e}")
+
+    print(f"\nExported to: {out}")
 
 
 # ─── メイン ───
 
 def main():
-    parser = argparse.ArgumentParser(description="Claude Code通信ログ クエリツール")
+    parser = argparse.ArgumentParser(
+        description="Claude Code通信ログ クエリツール（DuckDB + JSONL版）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python query_logs.py summary                  # 全リクエスト概要
+  python query_logs.py timeline                 # 統合タイムライン
+  python query_logs.py cache-analysis           # キャッシュ効果
+  python query_logs.py sql "SELECT * FROM requests LIMIT 5"
+  python query_logs.py export ./parquet_out     # Parquet出力
+        """
+    )
     parser.add_argument("command", choices=[
-        "summary", "tools", "sessions", "system-prompt", "tool-definitions",
-        "claude-md", "sse-timeline", "hooks", "tokens", "timeline",
-        "tool-detail", "sql",
+        "summary", "tools", "tool-ranking", "sessions", "session-diff",
+        "system-prompt", "tool-definitions", "claude-md",
+        "sse-timeline", "hooks", "tokens", "cache-analysis",
+        "timeline", "sql", "export",
     ])
     parser.add_argument("args", nargs="*", default=[])
-    parser.add_argument("--proxy-db", type=Path, default=DEFAULT_PROXY_DB)
-    parser.add_argument("--hook-db", type=Path, default=DEFAULT_HOOK_DB)
+    parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR,
+                        help="Directory containing JSONL log files")
 
     args = parser.parse_args()
-    proxy_db = connect(args.proxy_db)
-    hook_db = connect(args.hook_db)
+    conn = create_connection(args.log_dir)
 
     commands = {
-        "summary": lambda: cmd_summary(proxy_db, hook_db),
-        "tools": lambda: cmd_tools(proxy_db, hook_db),
-        "sessions": lambda: cmd_sessions(proxy_db, hook_db),
-        "system-prompt": lambda: cmd_system_prompt(proxy_db, hook_db, args.args[0] if args.args else None),
-        "tool-definitions": lambda: cmd_tool_definitions(proxy_db, hook_db, args.args[0] if args.args else None),
-        "claude-md": lambda: cmd_claude_md(proxy_db, hook_db),
-        "sse-timeline": lambda: cmd_sse_timeline(proxy_db, hook_db, args.args[0] if args.args else None),
-        "hooks": lambda: cmd_hooks(proxy_db, hook_db),
-        "tokens": lambda: cmd_tokens(proxy_db, hook_db),
-        "timeline": lambda: cmd_timeline(proxy_db, hook_db),
-        "tool-detail": lambda: cmd_tools(proxy_db, hook_db),  # 同じだけどフィルタ追加予定
-        "sql": lambda: cmd_sql(proxy_db, hook_db, args.args[0] if args.args else "SELECT 1"),
+        "summary":          lambda: cmd_summary(conn),
+        "tools":            lambda: cmd_tools(conn),
+        "tool-ranking":     lambda: cmd_tool_ranking(conn),
+        "sessions":         lambda: cmd_sessions(conn),
+        "session-diff":     lambda: cmd_session_diff(conn),
+        "system-prompt":    lambda: cmd_system_prompt(conn, args.args[0] if args.args else None),
+        "tool-definitions": lambda: cmd_tool_definitions(conn, args.args[0] if args.args else None),
+        "claude-md":        lambda: cmd_claude_md(conn),
+        "sse-timeline":     lambda: cmd_sse_timeline(conn, args.args[0] if args.args else None),
+        "hooks":            lambda: cmd_hooks(conn),
+        "tokens":           lambda: cmd_tokens(conn),
+        "cache-analysis":   lambda: cmd_cache_analysis(conn),
+        "timeline":         lambda: cmd_timeline(conn),
+        "sql":              lambda: cmd_sql(conn, args.args[0] if args.args else "SELECT 1"),
+        "export":           lambda: cmd_export(conn, args.args[0] if args.args else None),
     }
 
     commands[args.command]()
-
-    if proxy_db:
-        proxy_db.close()
-    if hook_db:
-        hook_db.close()
+    conn.close()
 
 
 if __name__ == "__main__":

@@ -18,7 +18,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
-DB_FILE="$LOG_DIR/claude_traffic.db"
 PORT="${1:-8080}"
 
 mkdir -p "$LOG_DIR"
@@ -28,7 +27,7 @@ echo "║  Claude Code Proxy Analysis                             ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 echo "║                                                         ║"
 echo "║  Proxy:  http://localhost:$PORT                          ║"
-echo "║  DB:     $DB_FILE"
+echo "║  Logs:   $LOG_DIR/*.jsonl"
 echo "║  Addon:  $SCRIPT_DIR/proxy/claude_logger.py"
 echo "║                                                         ║"
 echo "║  別ターミナルで以下を実行:                                ║"
@@ -36,6 +35,10 @@ echo "║                                                         ║"
 echo "║  HTTPS_PROXY=http://localhost:$PORT \\                    ║"
 echo "║  NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem \\"
 echo "║  claude                                                  ║"
+echo "║                                                         ║"
+echo "║  分析:                                                   ║"
+echo "║  python queries/query_logs.py summary                    ║"
+echo "║  python queries/query_logs.py timeline                   ║"
 echo "║                                                         ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
@@ -50,6 +53,6 @@ fi
 # mitmdumpで起動（Webインターフェースなし、ログに集中）
 exec mitmdump \
     --listen-port "$PORT" \
-    --set claude_db="$DB_FILE" \
+    --set claude_log_dir="$LOG_DIR" \
     -s "$SCRIPT_DIR/proxy/claude_logger.py" \
     --set flow_detail=0
