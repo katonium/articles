@@ -5,5 +5,6 @@
         "task.vscode-task",
         "jebbs.plantuml",
         "github.vscode-github-actions",
+        "hediet.vscode-drawio",
     ]
 }

@@ -34,6 +34,10 @@ tasks:
     desc: Start zenn-cli
     cmds:
       - npx zenn preview --port {{.PORT}}
+  build-diagrams:
+    desc: Build draw.io diagrams to PNG
+    cmds:
+      - ./scripts/build-diagrams.sh
   deploy:
     desc: Deploy zenn article
     cmds:
