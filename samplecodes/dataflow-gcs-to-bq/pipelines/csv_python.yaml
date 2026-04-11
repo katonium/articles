@@ -1,0 +1,93 @@
+# Beam YAML パイプライン: CSV → BigQuery (インライン Python 変換)
+#
+# csv.yaml と入力ファイルは同じ (sample.csv) だが、変換ロジックを SQL ノードではなく
+# Beam YAML が提供するインライン Python で書く。
+#
+# 3 つのスタイルを 1 本に詰めて Python のカバー範囲を見せる:
+#   - drop_col  → MapToFields (language: python) で 1 行の Python 式
+#   - null_drop → Filter (language: python) で 1 行の Python 式
+#   - utc_jst   → PyTransform (__callable__) で import 込みの本格的な PTransform
+#
+# 重要: ここでも Docker のビルドは一切ない。Google が提供する Dataflow の
+# YAML runner Flex Template が Python ランタイムを持っているため、
+# ワーカー側で source: のコードがそのまま exec される。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+
+    # ── ブランチ 1: drop_col (MapToFields の language: python) ──
+    # Python 式として 1 行ずつ書ける。fields に列挙したフィールドだけが残るので
+    # 「列削除」もこれで表現できる。
+    - type: MapToFields
+      name: PyDropCol
+      input: Read
+      config:
+        language: python
+        fields:
+          id: id
+          name: name
+          event_at_utc: event_at_utc
+
+    - type: WriteToBigQuery
+      name: WritePyDropCol
+      input: PyDropCol
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_drop_col"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    # ── ブランチ 2: utc_jst (PyTransform __callable__) ──
+    # import が必要なロジックは PyTransform で完全な PTransform を埋め込む。
+    # constructor: __callable__ + source: にトリプル引用符のスクリプトを書くと
+    # ワーカー側で関数として読み込まれ、PCollection を受け取り PCollection を返す。
+    - type: PyTransform
+      name: PyUtcJst
+      input: Read
+      config:
+        constructor: __callable__
+        kwargs:
+          source: |
+            def transform(pcoll):
+              import apache_beam as beam
+              from datetime import datetime, timedelta
+
+              def to_jst(row):
+                utc = datetime.strptime(row.event_at_utc, "%Y-%m-%d %H:%M:%S")
+                jst = utc + timedelta(hours=9)
+                return beam.Row(
+                  id=row.id,
+                  name=row.name,
+                  secret=row.secret,
+                  event_at_jst=jst.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+
+              return pcoll | "ToJst" >> beam.Map(to_jst)
+
+    - type: WriteToBigQuery
+      name: WritePyUtcJst
+      input: PyUtcJst
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_utc_jst"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    # ── ブランチ 3: null_drop (Filter の language: python) ──
+    - type: Filter
+      name: PyNullDrop
+      input: Read
+      config:
+        language: python
+        keep: "name is not None"
+
+    - type: WriteToBigQuery
+      name: WritePyNullDrop
+      input: PyNullDrop
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_null_drop"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

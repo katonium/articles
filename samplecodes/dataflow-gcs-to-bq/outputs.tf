@@ -18,11 +18,15 @@ output "dataflow_worker_sa_email" {
   value = google_service_account.dataflow_worker.email
 }
 
-output "template_spec_gcs_path" {
-  value = local.template_spec_gcs_path
+# 各 format に対応する YAML パイプラインの GCS パス
+output "yaml_pipeline_gcs_paths" {
+  value = {
+    for k, _ in local.yaml_files :
+    k => "gs://${google_storage_bucket.workspace.name}/pipelines/${k}.yaml"
+  }
 }
 
-# Go テストはこのマップから (format, lang, pattern) -> table_id を解決する
+# Go テストはこのマップから (format, pattern) -> table_id を解決する
 output "destination_tables" {
   value = {
     for k, _ in local.table_specs : k => google_bigquery_table.destinations[k].table_id

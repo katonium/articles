@@ -2,17 +2,18 @@
 // Go テストスイート。
 //
 // 責務:
-//   - TestMain: フィクスチャ (CSV/TSV/JSON/csv.gz) を GCS にアップロード
-//   - 各 subtest の前に宛先テーブルを TRUNCATE
-//   - Dataflow REST API で Flex Template を 4 並列でキックし完了待機
-//   - BigQuery にクエリして 24 ケースをアサーション
-//   - 後片付け
+//   - フィクスチャ (CSV/TSV/JSON/csv.gz) を GCS にアップロード
+//   - 各テストの前後で宛先テーブルを TRUNCATE
+//   - `gcloud dataflow yaml run` で 5 本の Beam YAML パイプラインを並列起動
+//   - Dataflow REST API で JOB_STATE_DONE を待機
+//   - BigQuery にクエリして 15 ケース (5 形式 × 3 変換) をアサーション
 //
-// 検証対象 (Dataflow パイプライン) には一切のテスト用ロジックを入れず、
-// 「Go テストが通る = Dataflow が期待通りに動いている」という保証になるよう書く。
+// 検証対象 (Beam YAML パイプライン) には一切のテスト用ロジックを入れず、
+// 「Go テストが通る = YAML が宣言通りに動いている」という保証になるよう書く。
 package dataflow_gcs_to_bq_test
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -60,13 +61,6 @@ func plus9h(t time.Time) time.Time {
 	return t.Add(9 * time.Hour)
 }
 
-func nullString(s string) interface{} {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
 // ──────────────────────────────────────────────
 // terraform output 取得
 // ──────────────────────────────────────────────
@@ -77,8 +71,8 @@ type tfOutput struct {
 	BucketName            string
 	DatasetID             string
 	DataflowWorkerSAEmail string
-	TemplateSpecGCSPath   string
-	DestinationTables     map[string]string // key: "{format}_{lang}_{pattern}"
+	YamlPipelineGCSPaths  map[string]string // key: format -> gs://.../pipelines/{format}.yaml
+	DestinationTables     map[string]string // key: "{format}_{pattern}" -> table_id
 }
 
 func getTerraformOutputs(t *testing.T) *tfOutput {
@@ -136,7 +130,7 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 		BucketName:            getString("bucket_name"),
 		DatasetID:             getString("dataset_id"),
 		DataflowWorkerSAEmail: getString("dataflow_worker_sa_email"),
-		TemplateSpecGCSPath:   getString("template_spec_gcs_path"),
+		YamlPipelineGCSPaths:  getMap("yaml_pipeline_gcs_paths"),
 		DestinationTables:     getMap("destination_tables"),
 	}
 }
@@ -146,11 +140,20 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 // ──────────────────────────────────────────────
 
 const (
-	gcsObjectCSV    = "input/sample.csv"
-	gcsObjectTSV    = "input/sample.tsv"
-	gcsObjectJSON   = "input/sample.json"
-	gcsObjectCSVGZ  = "input/sample.csv.gz"
+	gcsObjectCSV   = "input/sample.csv"
+	gcsObjectTSV   = "input/sample.tsv"
+	gcsObjectJSON  = "input/sample.json"
+	gcsObjectCSVGZ = "input/sample.csv.gz"
 )
+
+// 各 format に対応する GCS 入力ファイル。csv_python は csv と同じファイルを使う。
+var formatToInputObject = map[string]string{
+	"csv":        gcsObjectCSV,
+	"tsv":        gcsObjectTSV,
+	"json":       gcsObjectJSON,
+	"csv_gz":     gcsObjectCSVGZ,
+	"csv_python": gcsObjectCSV,
+}
 
 func uploadFixtures(t *testing.T, ctx context.Context, tf *tfOutput) {
 	t.Helper()
@@ -268,58 +271,77 @@ func truncateAllTables(t *testing.T, ctx context.Context, tf *tfOutput) {
 }
 
 // ──────────────────────────────────────────────
-// Dataflow Flex Template 起動 / 完了待機
+// gcloud dataflow yaml run でジョブを起動
 // ──────────────────────────────────────────────
 
-var formatToInputObject = map[string]string{
-	"csv":    gcsObjectCSV,
-	"tsv":    gcsObjectTSV,
-	"json":   gcsObjectJSON,
-	"csv_gz": gcsObjectCSVGZ,
+// gcloudJobOutput は `gcloud dataflow yaml run --format=json` の戻り値を受ける
+// 構造体。最低限必要な job ID だけ拾う。
+type gcloudJobOutput struct {
+	ID string `json:"id"`
 }
 
-func launchFlexTemplate(ctx context.Context, tf *tfOutput, format string) (string, error) {
-	svc, err := dataflow.NewService(ctx)
-	if err != nil {
-		return "", fmt.Errorf("dataflow service: %w", err)
+func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, error) {
+	t.Helper()
+
+	yamlPath, ok := tf.YamlPipelineGCSPaths[format]
+	if !ok {
+		return "", fmt.Errorf("yaml path not found for format %s", format)
 	}
 
 	objectName, ok := formatToInputObject[format]
 	if !ok {
-		return "", fmt.Errorf("unknown format: %s", format)
+		return "", fmt.Errorf("input object not found for format %s", format)
 	}
 	inputPath := fmt.Sprintf("gs://%s/%s", tf.BucketName, objectName)
 
-	jobName := fmt.Sprintf("df-gcs-to-bq-%s-%d", strings.ReplaceAll(format, "_", "-"), time.Now().Unix())
-
-	req := &dataflow.LaunchFlexTemplateRequest{
-		LaunchParameter: &dataflow.LaunchFlexTemplateParameter{
-			JobName:              jobName,
-			ContainerSpecGcsPath: tf.TemplateSpecGCSPath,
-			Parameters: map[string]string{
-				"format":              format,
-				"input_path":          inputPath,
-				"output_table_prefix": format,
-				"bq_project":          tf.ProjectID,
-				"bq_dataset":          tf.DatasetID,
-			},
-			Environment: &dataflow.FlexTemplateRuntimeEnvironment{
-				ServiceAccountEmail: tf.DataflowWorkerSAEmail,
-				TempLocation:        fmt.Sprintf("gs://%s/temp/", tf.BucketName),
-				StagingLocation:     fmt.Sprintf("gs://%s/staging/", tf.BucketName),
-			},
-		},
+	jinjaVars := map[string]string{
+		"input_path": inputPath,
+		"project":    tf.ProjectID,
+		"dataset":    tf.DatasetID,
+		"prefix":     format,
 	}
-
-	resp, err := svc.Projects.Locations.FlexTemplates.Launch(tf.ProjectID, tf.Region, req).Do()
+	jinjaJSON, err := json.Marshal(jinjaVars)
 	if err != nil {
-		return "", fmt.Errorf("launch flex template: %w", err)
+		return "", fmt.Errorf("marshal jinja: %w", err)
 	}
-	if resp.Job == nil {
-		return "", fmt.Errorf("launch response has no job")
+
+	jobName := fmt.Sprintf("df-gcs-to-bq-%s-%d",
+		strings.ReplaceAll(format, "_", "-"), time.Now().Unix())
+
+	args := []string{
+		"dataflow", "yaml", "run", jobName,
+		"--yaml-pipeline-file", yamlPath,
+		"--region", tf.Region,
+		"--service-account-email", tf.DataflowWorkerSAEmail,
+		"--temp-location", fmt.Sprintf("gs://%s/temp/", tf.BucketName),
+		"--staging-location", fmt.Sprintf("gs://%s/staging/", tf.BucketName),
+		"--jinja-variables", string(jinjaJSON),
+		"--project", tf.ProjectID,
+		"--format", "json",
 	}
-	return resp.Job.Id, nil
+	cmd := exec.Command("gcloud", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gcloud dataflow yaml run failed: %w\nstderr: %s",
+			err, stderr.String())
+	}
+
+	var out gcloudJobOutput
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		return "", fmt.Errorf("parse gcloud output: %w\nstdout: %s",
+			err, stdout.String())
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("gcloud output has no job id\nstdout: %s", stdout.String())
+	}
+	return out.ID, nil
 }
+
+// ──────────────────────────────────────────────
+// Dataflow ジョブ完了待機
+// ──────────────────────────────────────────────
 
 func waitForJob(ctx context.Context, projectID, region, jobID string) (string, error) {
 	svc, err := dataflow.NewService(ctx)
@@ -442,7 +464,6 @@ func tsStr(ts time.Time) string {
 	return ts.UTC().Format(tsLayout)
 }
 
-// drop_col の期待値: secret 列を削除した 5 行
 func assertDropCol(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
 	t.Helper()
 	sql := fmt.Sprintf("SELECT id, name, event_at_utc FROM `%s` ORDER BY id", fqTable)
@@ -464,13 +485,9 @@ func assertDropCol(t *testing.T, ctx context.Context, client *bigquery.Client, f
 	}
 }
 
-// utc_jst の期待値: event_at_jst が UTC+9 になった 5 行
 func assertUtcJst(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
 	t.Helper()
-	sql := fmt.Sprintf(
-		"SELECT id, name, secret, event_at_jst FROM `%s` ORDER BY id",
-		fqTable,
-	)
+	sql := fmt.Sprintf("SELECT id, name, secret, event_at_jst FROM `%s` ORDER BY id", fqTable)
 	rows, err := queryRows(ctx, client, sql)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -489,13 +506,9 @@ func assertUtcJst(t *testing.T, ctx context.Context, client *bigquery.Client, fq
 	}
 }
 
-// null_drop の期待値: name が NULL でない 3 行 (id ∈ {1, 2, 4})
 func assertNullDrop(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
 	t.Helper()
-	sql := fmt.Sprintf(
-		"SELECT id, name, secret, event_at_utc FROM `%s` ORDER BY id",
-		fqTable,
-	)
+	sql := fmt.Sprintf("SELECT id, name, secret, event_at_utc FROM `%s` ORDER BY id", fqTable)
 	rows, err := queryRows(ctx, client, sql)
 	if err != nil {
 		t.Fatalf("query: %v", err)
@@ -522,6 +535,8 @@ var assertionByPattern = map[string]assertion{
 // メインのテストケース
 // ──────────────────────────────────────────────
 
+var allFormats = []string{"csv", "tsv", "json", "csv_gz", "csv_python"}
+
 func TestDataflowGcsToBq(t *testing.T) {
 	ctx := context.Background()
 	tf := getTerraformOutputs(t)
@@ -530,18 +545,17 @@ func TestDataflowGcsToBq(t *testing.T) {
 	uploadFixtures(t, ctx, tf)
 	truncateAllTables(t, ctx, tf)
 
-	// 4 ジョブを並列起動 → 全完了待ち
-	formats := []string{"csv", "tsv", "json", "csv_gz"}
-	jobIDs := make(map[string]string, len(formats))
+	// 5 ジョブを並列起動
+	jobIDs := make(map[string]string, len(allFormats))
 	var jobMu sync.Mutex
-
 	var launchWg sync.WaitGroup
 	var launchErrs []error
-	for _, f := range formats {
+
+	for _, f := range allFormats {
 		launchWg.Add(1)
 		go func(format string) {
 			defer launchWg.Done()
-			id, err := launchFlexTemplate(ctx, tf, format)
+			id, err := launchYamlPipeline(t, tf, format)
 			jobMu.Lock()
 			defer jobMu.Unlock()
 			if err != nil {
@@ -561,6 +575,7 @@ func TestDataflowGcsToBq(t *testing.T) {
 		t.FailNow()
 	}
 
+	// 全ジョブの完了待機
 	var waitWg sync.WaitGroup
 	var waitMu sync.Mutex
 	var waitErrs []error
@@ -587,7 +602,7 @@ func TestDataflowGcsToBq(t *testing.T) {
 		t.FailNow()
 	}
 
-	// 24 ケースをアサーション
+	// 15 ケースをアサーション
 	bqClient, err := bigquery.NewClient(ctx, tf.ProjectID)
 	if err != nil {
 		t.Fatalf("bq client: %v", err)
@@ -602,23 +617,8 @@ func TestDataflowGcsToBq(t *testing.T) {
 
 	for _, key := range keys {
 		key := key
-		// key は "{format}_{lang}_{pattern}" 形式
-		// format は csv / tsv / json / csv_gz, lang は sql / py,
-		// pattern は drop_col / utc_jst / null_drop
-		var format, lang, pattern string
-		switch {
-		case strings.HasPrefix(key, "csv_gz_"):
-			format = "csv_gz"
-			rest := strings.TrimPrefix(key, "csv_gz_")
-			lang, pattern = splitLangPattern(rest)
-		default:
-			// csv_, tsv_, json_
-			i := strings.Index(key, "_")
-			format = key[:i]
-			rest := key[i+1:]
-			lang, pattern = splitLangPattern(rest)
-		}
-
+		// key は "{format}_{pattern}" 形式
+		format, pattern := splitFormatPattern(key)
 		assertFn, ok := assertionByPattern[pattern]
 		if !ok {
 			t.Errorf("unknown pattern in table key: %s", key)
@@ -626,7 +626,7 @@ func TestDataflowGcsToBq(t *testing.T) {
 		}
 
 		fqTable := fmt.Sprintf("%s.%s.%s", tf.ProjectID, tf.DatasetID, tf.DestinationTables[key])
-		subname := fmt.Sprintf("format=%s/lang=%s/pattern=%s", format, lang, pattern)
+		subname := fmt.Sprintf("format=%s/pattern=%s", format, pattern)
 		t.Run(subname, func(t *testing.T) {
 			assertFn(t, ctx, bqClient, fqTable)
 		})
@@ -638,15 +638,14 @@ func TestDataflowGcsToBq(t *testing.T) {
 	}
 }
 
-// "sql_drop_col" -> ("sql", "drop_col")
-// "py_utc_jst"   -> ("py", "utc_jst")
-// "sql_null_drop" -> ("sql", "null_drop")
-func splitLangPattern(s string) (lang string, pattern string) {
-	switch {
-	case strings.HasPrefix(s, "sql_"):
-		return "sql", strings.TrimPrefix(s, "sql_")
-	case strings.HasPrefix(s, "py_"):
-		return "py", strings.TrimPrefix(s, "py_")
+// "csv_drop_col" -> ("csv", "drop_col")
+// "csv_gz_utc_jst" -> ("csv_gz", "utc_jst")
+// "csv_python_null_drop" -> ("csv_python", "null_drop")
+func splitFormatPattern(key string) (format string, pattern string) {
+	for _, p := range []string{"drop_col", "utc_jst", "null_drop"} {
+		if strings.HasSuffix(key, "_"+p) {
+			return strings.TrimSuffix(key, "_"+p), p
+		}
 	}
-	return "", s
+	return "", key
 }

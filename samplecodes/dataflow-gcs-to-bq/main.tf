@@ -41,8 +41,6 @@ resource "google_project_service" "services" {
     "dataflow.googleapis.com",
     "bigquery.googleapis.com",
     "storage.googleapis.com",
-    "artifactregistry.googleapis.com",
-    "cloudbuild.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
   ])
@@ -53,7 +51,7 @@ resource "google_project_service" "services" {
 }
 
 # ──────────────────────────────────────────────
-# GCS バケット (input / staging / temp / templates)
+# GCS バケット (input / staging / temp / pipelines)
 # ──────────────────────────────────────────────
 
 resource "google_storage_bucket" "workspace" {
@@ -67,17 +65,35 @@ resource "google_storage_bucket" "workspace" {
 }
 
 # ──────────────────────────────────────────────
-# Artifact Registry (Flex Template Docker イメージ用)
+# Beam YAML パイプラインを GCS にアップロード
 # ──────────────────────────────────────────────
+#
+# YAML はリポジトリ内の pipelines/ 配下を Source of Truth にし、
+# Terraform でハッシュベースに GCS に upload する。Job Builder GUI で
+# 編集 → エクスポートして diff を取りやすくするためにバージョン管理している。
 
-resource "google_artifact_registry_repository" "flex_template" {
-  project       = var.project_id
-  location      = var.region
-  repository_id = "dataflow-flex-templates-${local.suffix}"
-  format        = "DOCKER"
-  description   = "Dataflow GCS->BQ verification Flex Template images"
+locals {
+  # 4 本の SQL パイプラインに加え、インライン Python の代表として csv_python を 1 本。
+  # csv_python は入力ファイルは csv.yaml と同じ sample.csv を使い、変換ロジックだけ
+  # Python (MapToFields / Filter / PyTransform) で書いている。
+  yaml_files = {
+    csv        = "${path.module}/pipelines/csv.yaml"
+    tsv        = "${path.module}/pipelines/tsv.yaml"
+    json       = "${path.module}/pipelines/json.yaml"
+    csv_gz     = "${path.module}/pipelines/csv_gz.yaml"
+    csv_python = "${path.module}/pipelines/csv_python.yaml"
+  }
+}
 
-  depends_on = [google_project_service.services]
+resource "google_storage_bucket_object" "yaml_pipelines" {
+  for_each = local.yaml_files
+
+  name   = "pipelines/${each.key}.yaml"
+  bucket = google_storage_bucket.workspace.name
+  source = each.value
+
+  # ファイル変更時に再アップロードされるよう content_type と detect_md5_hash を使う
+  content_type = "application/x-yaml"
 }
 
 # ──────────────────────────────────────────────
@@ -90,7 +106,6 @@ resource "google_service_account" "dataflow_worker" {
   project      = var.project_id
 }
 
-# Dataflow ワーカーとして動作するための最小権限
 resource "google_project_iam_member" "worker_dataflow" {
   project = var.project_id
   role    = "roles/dataflow.worker"
@@ -123,7 +138,7 @@ resource "google_service_account_iam_member" "runner_can_actas_worker" {
 }
 
 # ──────────────────────────────────────────────
-# BigQuery dataset + 24 個の宛先テーブル
+# BigQuery dataset + 12 個の宛先テーブル
 # ──────────────────────────────────────────────
 
 resource "google_bigquery_dataset" "verification" {
@@ -136,8 +151,9 @@ resource "google_bigquery_dataset" "verification" {
 }
 
 locals {
-  formats = ["csv", "tsv", "json", "csv_gz"]
-  langs   = ["sql", "py"]
+  # 検証 matrix の "形式 × Python 1 本" の 5 本。csv_python は CSV ファイル入力 +
+  # インライン Python 変換のケースで、ファイル形式というより「変換言語の比較対象」。
+  formats = ["csv", "tsv", "json", "csv_gz", "csv_python"]
 
   schema_drop_col = jsonencode([
     { name = "id", type = "INT64", mode = "REQUIRED" },
@@ -165,19 +181,16 @@ locals {
     null_drop = local.schema_null_drop
   }
 
-  # {format}_{lang}_{pattern} の組み合わせを 24 件分展開
+  # {format}_{pattern} の組み合わせを 12 件展開
   table_specs = merge([
-    for fmt in local.formats : merge([
-      for lang in local.langs : {
-        for pat, schema in local.patterns :
-        "${fmt}_${lang}_${pat}" => {
-          schema = schema
-          fmt    = fmt
-          lang   = lang
-          pat    = pat
-        }
+    for fmt in local.formats : {
+      for pat, schema in local.patterns :
+      "${fmt}_${pat}" => {
+        schema = schema
+        fmt    = fmt
+        pat    = pat
       }
-    ]...)
+    }
   ]...)
 }
 
@@ -189,67 +202,4 @@ resource "google_bigquery_table" "destinations" {
   table_id            = each.key
   deletion_protection = false
   schema              = each.value.schema
-}
-
-# ──────────────────────────────────────────────
-# Flex Template ビルド (Docker イメージ + spec JSON)
-# ──────────────────────────────────────────────
-#
-# Terraform の責務として「Dataflow パイプライン (= Flex Template)」を
-# 作成するため、null_resource で gcloud を local-exec する。
-# pipeline/ 配下のソースに変化があったら自動で再ビルドされる。
-
-locals {
-  pipeline_dir = "${path.module}/pipeline"
-  image_uri = format(
-    "%s-docker.pkg.dev/%s/%s/dataflow-gcs-to-bq:%s",
-    var.region,
-    var.project_id,
-    google_artifact_registry_repository.flex_template.repository_id,
-    local.suffix,
-  )
-  template_spec_gcs_path = "gs://${google_storage_bucket.workspace.name}/templates/spec.json"
-
-  # ソースファイルのハッシュを trigger に使う
-  pipeline_source_hash = sha256(join("", [
-    filesha256("${local.pipeline_dir}/Dockerfile"),
-    filesha256("${local.pipeline_dir}/pipeline.py"),
-    filesha256("${local.pipeline_dir}/transforms.py"),
-    filesha256("${local.pipeline_dir}/requirements.txt"),
-    filesha256("${local.pipeline_dir}/metadata.json"),
-  ]))
-}
-
-resource "null_resource" "flex_template_build" {
-  triggers = {
-    source_hash = local.pipeline_source_hash
-    image_uri   = local.image_uri
-    spec_path   = local.template_spec_gcs_path
-  }
-
-  provisioner "local-exec" {
-    working_dir = local.pipeline_dir
-    command     = <<-EOT
-      set -euo pipefail
-
-      echo ">>> Building Docker image via Cloud Build: ${local.image_uri}"
-      gcloud builds submit \
-        --project=${var.project_id} \
-        --tag=${local.image_uri} \
-        .
-
-      echo ">>> Building Flex Template spec: ${local.template_spec_gcs_path}"
-      gcloud dataflow flex-template build ${local.template_spec_gcs_path} \
-        --project=${var.project_id} \
-        --image=${local.image_uri} \
-        --sdk-language=PYTHON \
-        --metadata-file=metadata.json
-    EOT
-  }
-
-  depends_on = [
-    google_artifact_registry_repository.flex_template,
-    google_storage_bucket.workspace,
-    google_project_service.services,
-  ]
 }

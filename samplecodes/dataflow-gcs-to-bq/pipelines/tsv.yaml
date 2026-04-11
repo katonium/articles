@@ -1,0 +1,74 @@
+# Beam YAML パイプライン: TSV → BigQuery
+#
+# csv.yaml との違いは ReadFromCsv の delimiter のみ。
+# Job Builder GUI では TSV は選択肢にないが、エクスポートされた YAML を
+# 手で 1 行 (delimiter: "\t") 足せば対応できる。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+        delimiter: "\t"
+
+    - type: Sql
+      name: DropCol
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          FROM PCOLLECTION
+
+    - type: WriteToBigQuery
+      name: WriteDropCol
+      input: DropCol
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_drop_col"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    - type: Sql
+      name: UtcJst
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            secret,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    - type: WriteToBigQuery
+      name: WriteUtcJst
+      input: UtcJst
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_utc_jst"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    - type: Sql
+      name: NullDrop
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            secret,
+            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: WriteNullDrop
+      input: NullDrop
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_null_drop"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

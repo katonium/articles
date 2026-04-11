@@ -1,0 +1,76 @@
+# Beam YAML パイプライン: gzip 圧縮 CSV → BigQuery
+#
+# csv.yaml との違いは compression: gzip のみ。
+# ReadFromCsv は内部で pandas read_csv を呼んでおり、compression='gzip' を渡せる。
+# 'infer' でも .gz 拡張子から自動判別される。
+# Job Builder GUI には gzip の選択肢はないが、エクスポートされた YAML を
+# 手で 1 行足せば対応できる。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+        compression: gzip
+
+    - type: Sql
+      name: DropCol
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          FROM PCOLLECTION
+
+    - type: WriteToBigQuery
+      name: WriteDropCol
+      input: DropCol
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_drop_col"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    - type: Sql
+      name: UtcJst
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            secret,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    - type: WriteToBigQuery
+      name: WriteUtcJst
+      input: UtcJst
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_utc_jst"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
+
+    - type: Sql
+      name: NullDrop
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            secret,
+            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: WriteNullDrop
+      input: NullDrop
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_null_drop"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
