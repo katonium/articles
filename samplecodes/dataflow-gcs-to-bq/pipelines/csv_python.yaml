@@ -1,9 +1,12 @@
-# Beam YAML パイプライン: CSV → BigQuery (インライン Python で全変換ステップをチェーン)
+# Beam YAML パイプライン: CSV → BigQuery (Python + SQL ハイブリッドチェーン)
 #
-# csv.yaml と同じ入力・出力だが、変換ロジックを SQL ではなくインライン Python で書く。
-# 2 つの Python スタイルを直列チェーンで示す:
-#   Step 1: PyTransform (__callable__) で secret 削除 + UTC→JST 変換
-#   Step 2: Filter (language: python) で NULL 行除去
+# Python (MapToFields / Filter) と SQL (Sql) を同じパイプラインで混在させて
+# 各自の得意領域を活かすパターン。
+#
+# 制約: PyTransform の __callable__ で beam.Row を返すと、Python ネイティブ型が
+# cross-language 境界で "pythonsdk_any:v1" に化けて Java 側 BigQueryIO がデコードできない。
+# → 型変換 (CAST / TIMESTAMPADD) は Sql ノードに任せ、Python は単純な列選択と
+#   フィルタリングに使うのが安全なパターン。
 
 pipeline:
   type: composite
@@ -13,33 +16,35 @@ pipeline:
       config:
         path: "{{ input_path }}"
 
-    # Step 1: secret 削除 + UTC→JST (import が必要なので PyTransform)
-    - type: PyTransform
-      name: DropColAndConvert
+    # Step 1: Python MapToFields で secret カラムを削除
+    # fields に列挙したフィールドだけが残る
+    - type: MapToFields
+      name: DropSecret
       input: Read
       config:
-        constructor: __callable__
-        kwargs:
-          source: |
-            def transform(pcoll):
-              import apache_beam as beam
-              from datetime import datetime, timedelta
+        language: python
+        fields:
+          id: id
+          name: name
+          event_at_utc: event_at_utc
 
-              def cleanse(row):
-                utc = datetime.strptime(row.event_at_utc, "%Y-%m-%d %H:%M:%S")
-                jst = utc + timedelta(hours=9)
-                return beam.Row(
-                  id=row.id,
-                  name=row.name,
-                  event_at_jst=jst.strftime("%Y-%m-%d %H:%M:%S"),
-                )
+    # Step 2: Sql で UTC→JST 変換 + 型を TIMESTAMP に CAST
+    # 型変換は Java/Calcite 側でやることで cross-language の型消失を回避する
+    - type: Sql
+      name: ConvertToJst
+      input: DropSecret
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
 
-              return pcoll | "Cleanse" >> beam.Map(cleanse)
-
-    # Step 2: name が NULL の行を除去 (1 行 Python 述語)
+    # Step 3: Python Filter で name が NULL の行を除去
     - type: Filter
       name: FilterNulls
-      input: DropColAndConvert
+      input: ConvertToJst
       config:
         language: python
         keep: "name is not None"

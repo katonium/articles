@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/dataflow/v1b3"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 )
 
 // ──────────────────────────────────────────────
@@ -313,8 +313,11 @@ func truncateTable(t *testing.T, ctx context.Context, client *bigquery.Client, p
 // gcloud dataflow yaml run
 // ──────────────────────────────────────────────
 
+// gcloud dataflow yaml run --format=json は {"job":{"id":"...",...}} を返す
 type gcloudJobOutput struct {
-	ID string `json:"id"`
+	Job struct {
+		ID string `json:"id"`
+	} `json:"job"`
 }
 
 type launchOpts struct {
@@ -383,7 +386,7 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string, opts launchOp
 		"--jinja-variables", string(jinjaJSON),
 		"--num-workers", "1",
 		"--max-workers", "1",
-		"--worker-machine-type", "n1-standard-1",
+		"--worker-machine-type", "e2-standard-2",
 		"--project", tf.ProjectID,
 		"--format", "json",
 	}
@@ -399,10 +402,10 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string, opts launchOp
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
 		return "", fmt.Errorf("parse: %w\nstdout: %s", err, stdout.String())
 	}
-	if out.ID == "" {
+	if out.Job.ID == "" {
 		return "", fmt.Errorf("no job id\nstdout: %s", stdout.String())
 	}
-	return out.ID, nil
+	return out.Job.ID, nil
 }
 
 // ──────────────────────────────────────────────
@@ -412,7 +415,9 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string, opts launchOp
 // waitForJob は Dataflow ジョブの完了を待つ。
 // タイムアウト時は自動で cancel リクエストを送り、課金が暴走するのを防ぐ。
 func waitForJob(ctx context.Context, projectID, region, jobID string) (string, error) {
-	svc, err := dataflow.NewService(ctx)
+	// ADC の quota project が対象プロジェクトと違う場合、Dataflow API 呼び出しが
+	// 「API not enabled」で失敗する。WithQuotaProject で明示的に指定する。
+	svc, err := dataflow.NewService(ctx, option.WithQuotaProject(projectID))
 	if err != nil {
 		return "", err
 	}
@@ -577,72 +582,42 @@ func TestDataflowGcsToBq(t *testing.T) {
 		deleteDatedSample(t, ctx, tf, today)
 	}()
 
-	// ── 成功パイプライン 6 本を並列起動 ──
-	jobIDs := make(map[string]string, len(allFormats))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var launchErrs []error
-
+	// ── 成功パイプライン 6 本を逐次起動 ──
+	//
+	// 並列起動だと launcher VM + worker VM の IP アドレスが IN_USE_ADDRESSES quota
+	// (us-central1 で 8) を超過する。1 ジョブずつ起動→完了→次、にすることで
+	// 最大 2 VM (launcher + worker) に抑える。合計 ~35 分かかるが確実に通る。
 	for _, f := range allFormats {
-		wg.Add(1)
-		go func(format string) {
-			defer wg.Done()
-			opts := launchOpts{}
-			if format == "csv_dated" {
-				opts.today = today
-				opts.passYyyymmdd = true
-			}
+		format := f
+		opts := launchOpts{}
+		if format == "csv_dated" {
+			opts.today = today
+			opts.passYyyymmdd = true
+		}
+		t.Run("run/"+format, func(t *testing.T) {
 			id, err := launchYamlPipeline(t, tf, format, opts)
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				launchErrs = append(launchErrs, fmt.Errorf("launch %s: %w", format, err))
-				return
+				t.Fatalf("launch %s: %v", format, err)
 			}
-			jobIDs[format] = id
 			t.Logf("launched %s: id=%s", format, id)
-		}(f)
-	}
-	wg.Wait()
-	for _, err := range launchErrs {
-		t.Errorf("%v", err)
-	}
-	if t.Failed() {
-		t.FailNow()
+
+			state, err := waitForJob(ctx, tf.ProjectID, tf.Region, id)
+			if err != nil {
+				t.Fatalf("%s (%s): %v", format, id, err)
+			}
+			t.Logf("job %s (%s) ended in state=%s", format, id, state)
+		})
+		if t.Failed() {
+			t.FailNow()
+		}
 	}
 
-	// ── 失敗パイプライン 1 本を起動 (並列の外で) ──
+	// ── 失敗パイプライン 1 本を起動 ──
 	failJobID, err := launchYamlPipeline(t, tf, "csv_required_fail", launchOpts{})
 	if err != nil {
 		t.Fatalf("launch csv_required_fail: %v", err)
 	}
 	t.Logf("launched csv_required_fail: id=%s", failJobID)
-
-	// ── 成功ジョブの完了待機 ──
-	var waitWg sync.WaitGroup
-	var waitMu sync.Mutex
-	var waitErrs []error
-	for f, id := range jobIDs {
-		waitWg.Add(1)
-		go func(format, jobID string) {
-			defer waitWg.Done()
-			state, err := waitForJob(ctx, tf.ProjectID, tf.Region, jobID)
-			waitMu.Lock()
-			defer waitMu.Unlock()
-			if err != nil {
-				waitErrs = append(waitErrs, fmt.Errorf("%s (%s): %w", format, jobID, err))
-				return
-			}
-			t.Logf("job %s (%s) ended in state=%s", format, jobID, state)
-		}(f, id)
-	}
-	waitWg.Wait()
-	for _, err := range waitErrs {
-		t.Errorf("%v", err)
-	}
-	if t.Failed() {
-		t.FailNow()
-	}
 
 	// ── 成功パイプラインのアサーション (6 ケース) ──
 	resultTables := []string{
