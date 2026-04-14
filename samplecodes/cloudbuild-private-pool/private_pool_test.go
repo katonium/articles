@@ -11,6 +11,7 @@ import (
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
+	"google.golang.org/api/option"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -82,7 +83,9 @@ type buildResult struct {
 func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string, steps []*cloudbuildpb.BuildStep) *buildResult {
 	t.Helper()
 
-	client, err := cloudbuild.NewClient(ctx)
+	// プライベートプールはリージョナル API を使用する必要がある
+	endpoint := fmt.Sprintf("%s-cloudbuild.googleapis.com:443", o.Region)
+	client, err := cloudbuild.NewClient(ctx, option.WithEndpoint(endpoint))
 	if err != nil {
 		t.Fatalf("Cloud Build クライアントの作成に失敗: %v", err)
 	}
@@ -94,6 +97,7 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string,
 			Pool: &cloudbuildpb.BuildOptions_PoolOption{
 				Name: o.WorkerPoolID,
 			},
+			Logging: cloudbuildpb.BuildOptions_CLOUD_LOGGING_ONLY,
 		},
 		ServiceAccount: fmt.Sprintf("projects/%s/serviceAccounts/%s", o.ProjectID, saEmail),
 		Timeout:        durationpb.New(120 * time.Second),
@@ -119,9 +123,16 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string,
 
 	resp, err := op.Wait(waitCtx)
 	if err != nil {
-		// タイムアウトやキャンセルの場合でもビルドステータスを返す
 		t.Logf("ビルド待機中にエラー: %v", err)
-		return &buildResult{Status: cloudbuildpb.Build_TIMEOUT}
+		// エラー時でもメタデータから実際のビルドステータスを取得
+		meta, metaErr := op.Metadata()
+		if metaErr == nil && meta != nil && meta.Build != nil {
+			return &buildResult{
+				Status: meta.Build.Status,
+				Logs:   meta.Build.LogUrl,
+			}
+		}
+		return &buildResult{Status: cloudbuildpb.Build_FAILURE}
 	}
 
 	return &buildResult{
