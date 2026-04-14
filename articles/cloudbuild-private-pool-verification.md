@@ -88,14 +88,48 @@ https://cloud.google.com/build/docs/private-pools/using-vpc-service-controls
 
 Shared VPC環境でプライベートプールを使う場合、**ピアリング接続はホストプロジェクトのVPCに対して1回作成すれば全サービスプロジェクトで共有される**ため、ゲストプロジェクトごとにピアリングが増殖する問題は発生しません。
 
-- IPレンジ割り当て・プライベート接続はホストプロジェクト側で作成
-- サービスプロジェクトがホストプロジェクトにアタッチ済みであること
-- ホスト・サービスプロジェクトは同一組織内であること（Shared VPC自体が組織必須）
-- VPC-SC使用時は同一ペリメータ内であること
-
 https://cloud.google.com/build/docs/private-pools/set-up-private-pool-to-use-in-vpc-network
 
 https://cloud.google.com/vpc/docs/private-services-access
+
+#### ホストプロジェクト管理者の作業（初回のみ）
+
+以下はホストプロジェクトの管理者が1回だけ実施すれば、以降のゲストプロジェクト側の作業（SA作成・ビルド実行等）には関与不要です。
+
+| 作業 | 内容 |
+|---|---|
+| Private Services Access | IPレンジ割り当て + `servicenetworking.googleapis.com` への接続をホストプロジェクトで作成 |
+| Shared VPC アタッチ | ゲストプロジェクトをサービスプロジェクトとして登録 |
+| ネットワーク権限（※推定） | ゲストの Cloud Build Service Agent に `roles/compute.networkUser` を付与 |
+
+:::message
+ネットワーク権限の付与について、Cloud Build 固有のドキュメントには明記されていません。Cloud Run / GKE 等の Shared VPC パターンからの推定です。実際の環境では検証の上、必要な権限を確認してください。
+:::
+
+https://docs.cloud.google.com/build/docs/securing-builds/configure-access-for-cloud-build-service-account
+
+#### ゲストプロジェクトで完結する作業
+
+以下はすべてゲストプロジェクト内で完結し、ホスト管理者の関与は不要です。
+
+| 作業 | 説明 |
+|---|---|
+| カスタムSAの作成 | ゲストプロジェクト内で自由に作成可能 |
+| `iam.serviceAccountUser` の付与 | ゲストの CB Service Agent → ゲスト内のカスタムSA |
+| Worker Pool の作成 | ゲストプロジェクト内に作成し、ホストVPCをクロスプロジェクト参照 |
+| ビルド投入・SA切り替え | ジョブごとにSAを指定して実行 |
+
+Worker Poolからホスト VPCをクロスプロジェクトで参照する場合:
+
+```hcl
+network_config {
+  peered_network = "projects/{HOST_PROJECT_ID}/global/networks/{NETWORK_NAME}"
+}
+```
+
+`roles/iam.serviceAccountUser` の付与は**ゲストプロジェクトの** Cloud Build Service Agent (`service-{GUEST_PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com`) に対して行います。ホストプロジェクト側の Service Agent は関係しません。
+
+https://docs.cloud.google.com/build/docs/private-pools/create-manage-private-pools
 
 ### Cloud Functions / Cloud Run functions との連携
 
