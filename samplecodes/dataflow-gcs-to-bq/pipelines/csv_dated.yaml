@@ -1,13 +1,19 @@
-# Beam YAML パイプライン: NDJSON → BigQuery (全変換ステップをチェーン)
+{#
+  Beam YAML パイプライン: 日付付き CSV → BigQuery (全変換ステップをチェーン)
+
+  yyyymmdd を渡せば明示パラメータモード (A)、
+  渡さなければ launcher VM の datetime.datetime.now() で自動計算モード (B)。
+#}
+{% set yyyymmdd = yyyymmdd if yyyymmdd is defined
+                  else datetime.datetime.now().strftime('%Y%m%d') %}
 
 pipeline:
   type: composite
   transforms:
-    - type: ReadFromJson
+    - type: ReadFromCsv
       name: Read
       config:
-        path: "{{ input_path }}"
-        lines: true
+        path: "{{ input_path_prefix }}/sample_{{ yyyymmdd }}.csv"
 
     - type: Sql
       name: DropColAndConvert
@@ -33,6 +39,6 @@ pipeline:
       name: Write
       input: FilterNulls
       config:
-        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
+        table: "{{ project }}.{{ dataset }}.csv_dated_{{ yyyymmdd }}_result"
         create_disposition: CREATE_NEVER
         write_disposition: WRITE_APPEND

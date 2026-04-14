@@ -1,0 +1,37 @@
+# Beam YAML パイプライン: REQUIRED スキーマの BQ テーブルに書き込む (意図的に失敗させる)
+#
+# Beam YAML の ReadFromCsv (pandas read_csv) は非 PK 列を NULLABLE として推論する。
+# これを BQ 側で REQUIRED フィールドを持つテーブルに LOAD しようとすると
+# "Provided Schema does not match Table ... changed mode from REQUIRED to NULLABLE"
+# エラーで失敗する。
+#
+# このパイプラインはその制約を検証するための「意図的な失敗ケース」。
+# Go test は JOB_STATE_FAILED を期待する。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+
+    - type: Sql
+      name: PassThrough
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            secret,
+            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          FROM PCOLLECTION
+
+    - type: WriteToBigQuery
+      name: Write
+      input: PassThrough
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

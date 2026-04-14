@@ -73,15 +73,21 @@ resource "google_storage_bucket" "workspace" {
 # 編集 → エクスポートして diff を取りやすくするためにバージョン管理している。
 
 locals {
-  # 4 本の SQL パイプラインに加え、インライン Python の代表として csv_python を 1 本。
-  # csv_python は入力ファイルは csv.yaml と同じ sample.csv を使い、変換ロジックだけ
-  # Python (MapToFields / Filter / PyTransform) で書いている。
+  # 5 本の静的な入力 (CSV / TSV / JSON / gzip CSV) + インライン Python の代表 csv_python。
+  # さらに csv_dated は「ファイル名と BQ テーブル名の両方に日付を埋め込むパターン」
+  # の検証用で、Jinja 条件分岐で (A) 明示パラメータ / (B) 自動計算 の両モードに対応する。
+  #
+  # csv_dated の BQ 宛先テーブルは日付付きで名前が毎回変わるため、Terraform では作らず
+  # Go test が test 実行時に create / drop する。Terraform が管理するのは YAML の
+  # GCS upload だけ。
   yaml_files = {
-    csv        = "${path.module}/pipelines/csv.yaml"
-    tsv        = "${path.module}/pipelines/tsv.yaml"
-    json       = "${path.module}/pipelines/json.yaml"
-    csv_gz     = "${path.module}/pipelines/csv_gz.yaml"
-    csv_python = "${path.module}/pipelines/csv_python.yaml"
+    csv               = "${path.module}/pipelines/csv.yaml"
+    tsv               = "${path.module}/pipelines/tsv.yaml"
+    json              = "${path.module}/pipelines/json.yaml"
+    csv_gz            = "${path.module}/pipelines/csv_gz.yaml"
+    csv_python        = "${path.module}/pipelines/csv_python.yaml"
+    csv_dated         = "${path.module}/pipelines/csv_dated.yaml"
+    csv_required_fail = "${path.module}/pipelines/csv_required_fail.yaml"
   }
 }
 
@@ -138,8 +144,16 @@ resource "google_service_account_iam_member" "runner_can_actas_worker" {
 }
 
 # ──────────────────────────────────────────────
-# BigQuery dataset + 12 個の宛先テーブル
+# BigQuery dataset
 # ──────────────────────────────────────────────
+#
+# 宛先テーブル本体 (静的 15 + dated 3 = 18 個) は Go test が create / drop する。
+# 名前が per-run で変わる dated テーブルと静的 15 テーブルとを同じ責務分担で扱うことで、
+# 「Terraform = 長生き (バケット / dataset / SA / IAM / YAML)」「Go = 一過性
+# (入力データ / テーブル / ジョブ / アサーション)」という線が綺麗に引ける。
+#
+# dataset は SA の IAM binding が必要なので Terraform 管轄で残す
+# (delete_contents_on_destroy で中身ごと片付く)。
 
 resource "google_bigquery_dataset" "verification" {
   project                    = var.project_id
@@ -148,58 +162,4 @@ resource "google_bigquery_dataset" "verification" {
   delete_contents_on_destroy = true
 
   depends_on = [google_project_service.services]
-}
-
-locals {
-  # 検証 matrix の "形式 × Python 1 本" の 5 本。csv_python は CSV ファイル入力 +
-  # インライン Python 変換のケースで、ファイル形式というより「変換言語の比較対象」。
-  formats = ["csv", "tsv", "json", "csv_gz", "csv_python"]
-
-  schema_drop_col = jsonencode([
-    { name = "id", type = "INT64", mode = "REQUIRED" },
-    { name = "name", type = "STRING", mode = "NULLABLE" },
-    { name = "event_at_utc", type = "TIMESTAMP", mode = "REQUIRED" },
-  ])
-
-  schema_utc_jst = jsonencode([
-    { name = "id", type = "INT64", mode = "REQUIRED" },
-    { name = "name", type = "STRING", mode = "NULLABLE" },
-    { name = "secret", type = "STRING", mode = "REQUIRED" },
-    { name = "event_at_jst", type = "TIMESTAMP", mode = "REQUIRED" },
-  ])
-
-  schema_null_drop = jsonencode([
-    { name = "id", type = "INT64", mode = "REQUIRED" },
-    { name = "name", type = "STRING", mode = "REQUIRED" },
-    { name = "secret", type = "STRING", mode = "REQUIRED" },
-    { name = "event_at_utc", type = "TIMESTAMP", mode = "REQUIRED" },
-  ])
-
-  patterns = {
-    drop_col  = local.schema_drop_col
-    utc_jst   = local.schema_utc_jst
-    null_drop = local.schema_null_drop
-  }
-
-  # {format}_{pattern} の組み合わせを 12 件展開
-  table_specs = merge([
-    for fmt in local.formats : {
-      for pat, schema in local.patterns :
-      "${fmt}_${pat}" => {
-        schema = schema
-        fmt    = fmt
-        pat    = pat
-      }
-    }
-  ]...)
-}
-
-resource "google_bigquery_table" "destinations" {
-  for_each = local.table_specs
-
-  project             = var.project_id
-  dataset_id          = google_bigquery_dataset.verification.dataset_id
-  table_id            = each.key
-  deletion_protection = false
-  schema              = each.value.schema
 }

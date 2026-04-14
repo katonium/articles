@@ -37,33 +37,45 @@
 
 | レイヤー | 責務 |
 |---|---|
-| **Terraform** | GCS バケット、Beam YAML を GCS にアップロード、BigQuery dataset と 15 個の宛先テーブル、Dataflow ワーカー SA、IAM。tfstate はローカル |
-| **Go テスト** | フィクスチャの GCS アップロード、テーブル truncate、`gcloud dataflow yaml run` で 5 ジョブ並列起動、Dataflow REST API でジョブ完了待機、BigQuery アサーション、後片付け |
+| **Terraform** | **長生きリソースのみ**: GCS バケット、Beam YAML を GCS にアップロード、BigQuery **dataset** (テーブルは作らない)、Dataflow ワーカー SA、IAM。tfstate はローカル |
+| **Go テスト** | **per-run リソースと検証ロジックのすべて**: フィクスチャの GCS アップロード、**BigQuery テーブル 18 個の create / drop** (静的 15 + dated 3)、`gcloud dataflow yaml run` で 6 ジョブ並列起動、Dataflow REST API でジョブ完了待機、BigQuery アサーション、後片付け |
 | **Beam YAML** | 純粋な ETL 宣言のみ。テスト用 cleanup / アサーション / 条件分岐は一切持たない |
 
-検証対象 (YAML) にテスト用ロジックを 1 行も入れないことで、「**Go テストが通る = YAML が宣言通りに動いている**」という保証になる。
+検証対象 (YAML) にテスト用ロジックを 1 行も入れないことで、「**Go テストが通る = YAML が宣言通りに動いている**」という保証になる。**テーブルも全部 Go が管理する**ことで、別の人が別の日に走らせても無改変で通る再現性が得られる。
 
 ## アーキテクチャ
 
 ```
             Go test
               │
-              ├─ TestMain: fixtures/{csv,tsv,json} を GCS にアップロード
-              │            (csv.gz は Go 側で gzip して送る)
-              ├─ TRUNCATE 15 BQ tables
+              ├─ Setup:
+              │   ├─ fixtures/{csv,tsv,json} を GCS にアップロード
+              │   │   (csv.gz は Go 側で gzip して送る)
+              │   ├─ sample_{today}.csv を GCS にアップロード
+              │   └─ BQ テーブル 18 個 (静的 15 + dated 3) を Go が create
               │
-              ├─ exec.Command で gcloud dataflow yaml run × 5 並列
-              │     ┌─ csv.yaml         job ─┐
-              │     ├─ tsv.yaml         job ─┤  Google が提供する
-              │     ├─ json.yaml        job ─┤  YAML runner Flex Template
-              │     ├─ csv_gz.yaml      job ─┤  が裏で動く (Docker は自作しない)
-              │     └─ csv_python.yaml  job ─┘
+              ├─ Main parallel batch: gcloud dataflow yaml run × 6 並列
+              │     ┌─ csv.yaml         (Sql × 3)
+              │     ├─ tsv.yaml         (Sql × 3)
+              │     ├─ json.yaml        (Sql × 3)
+              │     ├─ csv_gz.yaml      (Sql × 3)
+              │     ├─ csv_python.yaml  (MapToFields + Filter + PyTransform)
+              │     └─ csv_dated.yaml   (Sql × 3, Mode A: 明示パラメータ)
               │
-              ├─ Dataflow REST API で JOB_STATE_DONE 待機
+              ├─ Dataflow REST API で全ジョブの JOB_STATE_DONE 待機
               │
-              └─ 15 ケースのアサーション
-                    SELECT * FROM <宛先テーブル> ORDER BY id
-                    → 期待 [][]string と完全一致を検証
+              ├─ 18 ケースのアサーション (modeA)
+              │
+              ├─ dated テーブルを TRUNCATE
+              │
+              ├─ csv_dated.yaml を再実行 (Mode B: jinja 変数なし、launcher VM が
+              │   datetime.datetime.now() で自動計算)
+              │
+              ├─ 3 ケースのアサーション (modeB, 同じ dated テーブル)
+              │
+              └─ Teardown:
+                  ├─ 18 BQ テーブルを Go が drop (成功時のみ)
+                  └─ sample_{today}.csv を GCS から削除
 ```
 
 各 YAML パイプラインは下記の DAG を実行する。
@@ -164,5 +176,6 @@ dataflow-gcs-to-bq/
 - **TSV と gzip CSV は Job Builder GUI には出てこない**: ただし `delimiter: "\t"` と `compression: gzip` を YAML に手で 1 行足せば対応できる。GUI から書き始めて軽く編集する、という Beam YAML らしい使い方。
 - **JST 変換 (SQL)**: Calcite の `TIMESTAMPADD(HOUR, 9, ...)` で素直に書く。`CONVERT_TIMEZONE` などのタイムゾーン関数はランナー依存があり Beam SQL では避ける。
 - **JST 変換 (Python)**: `PyTransform` の `__callable__` で `from datetime import timedelta` を import 込みで書く。1 行で済まない処理は MapToFields ではなく PyTransform を使うのが楽。
+- **動的な日付**: `csv_dated.yaml` は 1 本の YAML ファイルで (A) 明示パラメータモードと (B) launcher VM による自動計算モードの両方をサポートする。Jinja2 の `{% set yyyymmdd = yyyymmdd if yyyymmdd is defined else datetime.datetime.now().strftime('%Y%m%d') %}` というパターンで実現。Beam YAML の Jinja コンテキストには `datetime` モジュールが公式に公開されている。
 - **gzip フィクスチャ**: バイナリをコミットしたくないので `fixtures/sample.csv` を Go テストが gzip して GCS に送る。
-- **テーブル隔離**: 宛先テーブルは Terraform で 15 個固定で作成し、Go テストの前後で TRUNCATE して使い回す。
+- **テーブル管理**: **BQ テーブルは全部 Go 側で create / drop する**。Terraform は dataset のみ管理し、テーブル 18 個 (静的 15 + dated 3) の create / drop は Go test の setup/teardown で行う。「Terraform = 長生きリソース / Go = per-run リソース + 検証ロジック」という責務分離。これにより別の人が別の日に走らせても Terraform apply の再実行なしで通る。

@@ -1,15 +1,13 @@
 // Package dataflow_gcs_to_bq_test は Dataflow GCS->BQ 検証ワークスペースの
 // Go テストスイート。
 //
-// 責務:
-//   - フィクスチャ (CSV/TSV/JSON/csv.gz) を GCS にアップロード
-//   - 各テストの前後で宛先テーブルを TRUNCATE
-//   - `gcloud dataflow yaml run` で 5 本の Beam YAML パイプラインを並列起動
-//   - Dataflow REST API で JOB_STATE_DONE を待機
-//   - BigQuery にクエリして 15 ケース (5 形式 × 3 変換) をアサーション
+// 各 Beam YAML パイプラインは 3 つの変換 (カラム削除 + UTC→JST + NULL 行除去) を
+// 1 本のチェーンとして順番に通し、最終結果を 1 つの BigQuery テーブルに書き込む。
 //
-// 検証対象 (Beam YAML パイプライン) には一切のテスト用ロジックを入れず、
-// 「Go テストが通る = YAML が宣言通りに動いている」という保証になるよう書く。
+// テストケース:
+//   - 成功: csv / tsv / json / csv_gz / csv_python / csv_dated(A) / csv_dated(B) = 7
+//   - 失敗: csv_required_fail (REQUIRED スキーマに NULLABLE データを書いてエラー) = 1
+//   - 合計: 8
 package dataflow_gcs_to_bq_test
 
 import (
@@ -35,7 +33,7 @@ import (
 )
 
 // ──────────────────────────────────────────────
-// テストフィクスチャと期待値
+// 期待値
 // ──────────────────────────────────────────────
 
 const tsLayout = "2006-01-02 15:04:05"
@@ -48,7 +46,15 @@ func mustParseUTC(s string) time.Time {
 	return t.UTC()
 }
 
-// 全テスト共通の入力データ (UTC)
+func plus9h(t time.Time) time.Time {
+	return t.Add(9 * time.Hour)
+}
+
+func tsStr(ts time.Time) string {
+	return ts.UTC().Format(tsLayout)
+}
+
+// 全パイプライン共通の入力データ (UTC)
 var inputUTC = map[int]time.Time{
 	1: mustParseUTC("2026-04-10 01:00:00"),
 	2: mustParseUTC("2026-04-10 15:30:00"),
@@ -57,8 +63,12 @@ var inputUTC = map[int]time.Time{
 	5: mustParseUTC("2026-04-10 05:00:00"),
 }
 
-func plus9h(t time.Time) time.Time {
-	return t.Add(9 * time.Hour)
+// 全変換チェーン後の期待値: 3 行 (name が非 NULL の id=1,2,4)
+// カラム: id, name, event_at_jst (secret は削除済、event_at_utc は JST 変換済)
+var wantCleansed = [][]string{
+	{"1", "Alice", tsStr(plus9h(inputUTC[1]))}, // 2026-04-10 10:00:00
+	{"2", "Bob", tsStr(plus9h(inputUTC[2]))},   // 2026-04-11 00:30:00
+	{"4", "Dave", tsStr(plus9h(inputUTC[4]))},   // 2026-04-11 08:00:00
 }
 
 // ──────────────────────────────────────────────
@@ -71,8 +81,7 @@ type tfOutput struct {
 	BucketName            string
 	DatasetID             string
 	DataflowWorkerSAEmail string
-	YamlPipelineGCSPaths  map[string]string // key: format -> gs://.../pipelines/{format}.yaml
-	DestinationTables     map[string]string // key: "{format}_{pattern}" -> table_id
+	YamlPipelineGCSPaths  map[string]string
 }
 
 func getTerraformOutputs(t *testing.T) *tfOutput {
@@ -131,29 +140,12 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 		DatasetID:             getString("dataset_id"),
 		DataflowWorkerSAEmail: getString("dataflow_worker_sa_email"),
 		YamlPipelineGCSPaths:  getMap("yaml_pipeline_gcs_paths"),
-		DestinationTables:     getMap("destination_tables"),
 	}
 }
 
 // ──────────────────────────────────────────────
 // フィクスチャアップロード
 // ──────────────────────────────────────────────
-
-const (
-	gcsObjectCSV   = "input/sample.csv"
-	gcsObjectTSV   = "input/sample.tsv"
-	gcsObjectJSON  = "input/sample.json"
-	gcsObjectCSVGZ = "input/sample.csv.gz"
-)
-
-// 各 format に対応する GCS 入力ファイル。csv_python は csv と同じファイルを使う。
-var formatToInputObject = map[string]string{
-	"csv":        gcsObjectCSV,
-	"tsv":        gcsObjectTSV,
-	"json":       gcsObjectJSON,
-	"csv_gz":     gcsObjectCSVGZ,
-	"csv_python": gcsObjectCSV,
-}
 
 func uploadFixtures(t *testing.T, ctx context.Context, tf *tfOutput) {
 	t.Helper()
@@ -166,13 +158,12 @@ func uploadFixtures(t *testing.T, ctx context.Context, tf *tfOutput) {
 
 	bucket := client.Bucket(tf.BucketName)
 
-	uploadPlain := func(object, path string) {
-		f, err := os.Open(path)
+	uploadPlain := func(object, localPath string) {
+		f, err := os.Open(localPath)
 		if err != nil {
-			t.Fatalf("open %s: %v", path, err)
+			t.Fatalf("open %s: %v", localPath, err)
 		}
 		defer f.Close()
-
 		w := bucket.Object(object).NewWriter(ctx)
 		if _, err := io.Copy(w, f); err != nil {
 			_ = w.Close()
@@ -184,13 +175,12 @@ func uploadFixtures(t *testing.T, ctx context.Context, tf *tfOutput) {
 		t.Logf("uploaded gs://%s/%s", tf.BucketName, object)
 	}
 
-	uploadGzipped := func(object, path string) {
-		f, err := os.Open(path)
+	uploadGzipped := func(object, localPath string) {
+		f, err := os.Open(localPath)
 		if err != nil {
-			t.Fatalf("open %s: %v", path, err)
+			t.Fatalf("open %s: %v", localPath, err)
 		}
 		defer f.Close()
-
 		w := bucket.Object(object).NewWriter(ctx)
 		gw := gzip.NewWriter(w)
 		if _, err := io.Copy(gw, f); err != nil {
@@ -208,79 +198,140 @@ func uploadFixtures(t *testing.T, ctx context.Context, tf *tfOutput) {
 		t.Logf("uploaded gs://%s/%s (gzipped)", tf.BucketName, object)
 	}
 
-	uploadPlain(gcsObjectCSV, filepath.Join("fixtures", "sample.csv"))
-	uploadPlain(gcsObjectTSV, filepath.Join("fixtures", "sample.tsv"))
-	uploadPlain(gcsObjectJSON, filepath.Join("fixtures", "sample.json"))
-	// gzip は Go 側でアーカイブして送ることでフィクスチャをテキストで管理する
-	uploadGzipped(gcsObjectCSVGZ, filepath.Join("fixtures", "sample.csv"))
+	csvPath := filepath.Join("fixtures", "sample.csv")
+	uploadPlain("input/sample.csv", csvPath)
+	uploadPlain("input/sample.tsv", filepath.Join("fixtures", "sample.tsv"))
+	uploadPlain("input/sample.json", filepath.Join("fixtures", "sample.json"))
+	uploadGzipped("input/sample.csv.gz", csvPath)
 }
 
-// ──────────────────────────────────────────────
-// 宛先テーブル truncate
-// ──────────────────────────────────────────────
-
-func truncateAllTables(t *testing.T, ctx context.Context, tf *tfOutput) {
+func uploadDatedSample(t *testing.T, ctx context.Context, tf *tfOutput, today string) {
 	t.Helper()
-
-	client, err := bigquery.NewClient(ctx, tf.ProjectID)
+	client, err := storage.NewClient(ctx)
 	if err != nil {
-		t.Fatalf("bq client: %v", err)
+		t.Fatalf("storage client: %v", err)
 	}
 	defer client.Close()
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errs []error
-
-	for _, tbl := range tf.DestinationTables {
-		wg.Add(1)
-		go func(table string) {
-			defer wg.Done()
-			sql := fmt.Sprintf("TRUNCATE TABLE `%s.%s.%s`", tf.ProjectID, tf.DatasetID, table)
-			q := client.Query(sql)
-			job, err := q.Run(ctx)
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("truncate %s: %w", table, err))
-				mu.Unlock()
-				return
-			}
-			status, err := job.Wait(ctx)
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("truncate wait %s: %w", table, err))
-				mu.Unlock()
-				return
-			}
-			if err := status.Err(); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("truncate status %s: %w", table, err))
-				mu.Unlock()
-				return
-			}
-		}(tbl)
+	object := fmt.Sprintf("input/sample_%s.csv", today)
+	f, err := os.Open(filepath.Join("fixtures", "sample.csv"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
 	}
-	wg.Wait()
-
-	for _, err := range errs {
-		t.Errorf("%v", err)
+	defer f.Close()
+	w := client.Bucket(tf.BucketName).Object(object).NewWriter(ctx)
+	if _, err := io.Copy(w, f); err != nil {
+		_ = w.Close()
+		t.Fatalf("upload: %v", err)
 	}
-	if len(errs) > 0 {
-		t.FailNow()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	t.Logf("uploaded gs://%s/%s", tf.BucketName, object)
+}
+
+func deleteDatedSample(t *testing.T, ctx context.Context, tf *tfOutput, today string) {
+	t.Helper()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		t.Logf("storage client (cleanup): %v", err)
+		return
+	}
+	defer client.Close()
+	_ = client.Bucket(tf.BucketName).Object(fmt.Sprintf("input/sample_%s.csv", today)).Delete(ctx)
+}
+
+// ──────────────────────────────────────────────
+// テーブル管理 (Go 側で create / drop)
+// ──────────────────────────────────────────────
+
+// 全変換チェーン後の共通出力スキーマ: { id, name, event_at_jst }
+var schemaResult = bigquery.Schema{
+	{Name: "id", Type: bigquery.IntegerFieldType, Required: true},
+	{Name: "name", Type: bigquery.StringFieldType, Required: false},
+	{Name: "event_at_jst", Type: bigquery.TimestampFieldType, Required: false},
+}
+
+// 失敗テスト用: REQUIRED フィールドを含むスキーマ (Beam YAML の NULLABLE と衝突する)
+var schemaRequiredFail = bigquery.Schema{
+	{Name: "id", Type: bigquery.IntegerFieldType, Required: true},
+	{Name: "name", Type: bigquery.StringFieldType, Required: true},      // ← REQUIRED
+	{Name: "secret", Type: bigquery.StringFieldType, Required: true},    // ← REQUIRED
+	{Name: "event_at_utc", Type: bigquery.TimestampFieldType, Required: true}, // ← REQUIRED
+}
+
+var staticFormats = []string{"csv", "tsv", "json", "csv_gz", "csv_python"}
+
+// allTableSpecs は今回の test で必要な全テーブルの table_id → schema を返す。
+func allTableSpecs(today string) map[string]bigquery.Schema {
+	specs := make(map[string]bigquery.Schema)
+	for _, fmtName := range staticFormats {
+		specs[fmtName+"_result"] = schemaResult
+	}
+	specs[fmt.Sprintf("csv_dated_%s_result", today)] = schemaResult
+	specs["csv_required_fail_result"] = schemaRequiredFail
+	return specs
+}
+
+func createAllTables(t *testing.T, ctx context.Context, client *bigquery.Client, datasetID, today string) {
+	t.Helper()
+	for tableID, schema := range allTableSpecs(today) {
+		table := client.Dataset(datasetID).Table(tableID)
+		if err := table.Create(ctx, &bigquery.TableMetadata{Schema: schema}); err != nil {
+			if strings.Contains(err.Error(), "Already Exists") || strings.Contains(err.Error(), "duplicate") {
+				t.Logf("table %s already exists, reusing", tableID)
+				continue
+			}
+			t.Fatalf("create table %s: %v", tableID, err)
+		}
+	}
+	t.Logf("created %d tables", len(allTableSpecs(today)))
+}
+
+func dropAllTables(t *testing.T, ctx context.Context, client *bigquery.Client, datasetID, today string) {
+	t.Helper()
+	for tableID := range allTableSpecs(today) {
+		_ = client.Dataset(datasetID).Table(tableID).Delete(ctx)
+	}
+}
+
+func truncateTable(t *testing.T, ctx context.Context, client *bigquery.Client, projectID, datasetID, tableID string) {
+	t.Helper()
+	sql := fmt.Sprintf("TRUNCATE TABLE `%s.%s.%s`", projectID, datasetID, tableID)
+	q := client.Query(sql)
+	job, err := q.Run(ctx)
+	if err != nil {
+		t.Fatalf("truncate %s: %v", tableID, err)
+	}
+	if status, err := job.Wait(ctx); err != nil {
+		t.Fatalf("truncate wait %s: %v", tableID, err)
+	} else if err := status.Err(); err != nil {
+		t.Fatalf("truncate status %s: %v", tableID, err)
 	}
 }
 
 // ──────────────────────────────────────────────
-// gcloud dataflow yaml run でジョブを起動
+// gcloud dataflow yaml run
 // ──────────────────────────────────────────────
 
-// gcloudJobOutput は `gcloud dataflow yaml run --format=json` の戻り値を受ける
-// 構造体。最低限必要な job ID だけ拾う。
 type gcloudJobOutput struct {
 	ID string `json:"id"`
 }
 
-func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, error) {
+type launchOpts struct {
+	today        string
+	passYyyymmdd bool
+}
+
+var formatToInputObject = map[string]string{
+	"csv":               "input/sample.csv",
+	"tsv":               "input/sample.tsv",
+	"json":              "input/sample.json",
+	"csv_gz":            "input/sample.csv.gz",
+	"csv_python":        "input/sample.csv",
+	"csv_required_fail": "input/sample.csv",
+}
+
+func launchYamlPipeline(t *testing.T, tf *tfOutput, format string, opts launchOpts) (string, error) {
 	t.Helper()
 
 	yamlPath, ok := tf.YamlPipelineGCSPaths[format]
@@ -288,25 +339,39 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, erro
 		return "", fmt.Errorf("yaml path not found for format %s", format)
 	}
 
-	objectName, ok := formatToInputObject[format]
-	if !ok {
-		return "", fmt.Errorf("input object not found for format %s", format)
-	}
-	inputPath := fmt.Sprintf("gs://%s/%s", tf.BucketName, objectName)
-
 	jinjaVars := map[string]string{
-		"input_path": inputPath,
-		"project":    tf.ProjectID,
-		"dataset":    tf.DatasetID,
-		"prefix":     format,
+		"project": tf.ProjectID,
+		"dataset": tf.DatasetID,
+		"prefix":  format,
 	}
+
+	if format == "csv_dated" {
+		jinjaVars["input_path_prefix"] = fmt.Sprintf("gs://%s/input", tf.BucketName)
+		if opts.passYyyymmdd {
+			jinjaVars["yyyymmdd"] = opts.today
+		}
+	} else {
+		objectName, ok := formatToInputObject[format]
+		if !ok {
+			return "", fmt.Errorf("input object not found for format %s", format)
+		}
+		jinjaVars["input_path"] = fmt.Sprintf("gs://%s/%s", tf.BucketName, objectName)
+	}
+
 	jinjaJSON, err := json.Marshal(jinjaVars)
 	if err != nil {
 		return "", fmt.Errorf("marshal jinja: %w", err)
 	}
 
-	jobName := fmt.Sprintf("df-gcs-to-bq-%s-%d",
-		strings.ReplaceAll(format, "_", "-"), time.Now().Unix())
+	jobNameSuffix := strings.ReplaceAll(format, "_", "-")
+	if format == "csv_dated" {
+		if opts.passYyyymmdd {
+			jobNameSuffix = "csv-dated-a"
+		} else {
+			jobNameSuffix = "csv-dated-b"
+		}
+	}
+	jobName := fmt.Sprintf("df-gcs-to-bq-%s-%d", jobNameSuffix, time.Now().Unix())
 
 	args := []string{
 		"dataflow", "yaml", "run", jobName,
@@ -316,6 +381,9 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, erro
 		"--temp-location", fmt.Sprintf("gs://%s/temp/", tf.BucketName),
 		"--staging-location", fmt.Sprintf("gs://%s/staging/", tf.BucketName),
 		"--jinja-variables", string(jinjaJSON),
+		"--num-workers", "1",
+		"--max-workers", "1",
+		"--worker-machine-type", "n1-standard-1",
 		"--project", tf.ProjectID,
 		"--format", "json",
 	}
@@ -324,17 +392,15 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("gcloud dataflow yaml run failed: %w\nstderr: %s",
-			err, stderr.String())
+		return "", fmt.Errorf("gcloud yaml run failed: %w\nstderr: %s", err, stderr.String())
 	}
 
 	var out gcloudJobOutput
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		return "", fmt.Errorf("parse gcloud output: %w\nstdout: %s",
-			err, stdout.String())
+		return "", fmt.Errorf("parse: %w\nstdout: %s", err, stdout.String())
 	}
 	if out.ID == "" {
-		return "", fmt.Errorf("gcloud output has no job id\nstdout: %s", stdout.String())
+		return "", fmt.Errorf("no job id\nstdout: %s", stdout.String())
 	}
 	return out.ID, nil
 }
@@ -343,17 +409,17 @@ func launchYamlPipeline(t *testing.T, tf *tfOutput, format string) (string, erro
 // Dataflow ジョブ完了待機
 // ──────────────────────────────────────────────
 
+// waitForJob は Dataflow ジョブの完了を待つ。
+// タイムアウト時は自動で cancel リクエストを送り、課金が暴走するのを防ぐ。
 func waitForJob(ctx context.Context, projectID, region, jobID string) (string, error) {
 	svc, err := dataflow.NewService(ctx)
 	if err != nil {
 		return "", err
 	}
-
 	const (
 		pollInterval = 15 * time.Second
-		timeout      = 25 * time.Minute
+		timeout      = 20 * time.Minute
 	)
-
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		job, err := svc.Projects.Locations.Jobs.Get(projectID, region, jobID).Do()
@@ -368,14 +434,22 @@ func waitForJob(ctx context.Context, projectID, region, jobID string) (string, e
 		}
 		time.Sleep(pollInterval)
 	}
-	return "", fmt.Errorf("job %s did not finish within %s", jobID, timeout)
+
+	// タイムアウト: 課金防止のためジョブを cancel する
+	_, cancelErr := svc.Projects.Locations.Jobs.Update(
+		projectID, region, jobID,
+		&dataflow.Job{RequestedState: "JOB_STATE_CANCELLED"},
+	).Do()
+	if cancelErr != nil {
+		return "", fmt.Errorf("job %s timeout after %s, cancel also failed: %v", jobID, timeout, cancelErr)
+	}
+	return "JOB_STATE_CANCELLED", fmt.Errorf("job %s timeout after %s (auto-cancelled to prevent cost runaway)", jobID, timeout)
 }
 
 // ──────────────────────────────────────────────
-// BigQuery 結果取得 + 正規化比較
+// BigQuery クエリ + 正規化比較
 // ──────────────────────────────────────────────
 
-// queryRows は SELECT クエリを実行し、行を [][]bigquery.Value で返す
 func queryRows(ctx context.Context, client *bigquery.Client, sql string) ([][]bigquery.Value, error) {
 	q := client.Query(sql)
 	it, err := q.Read(ctx)
@@ -397,7 +471,6 @@ func queryRows(ctx context.Context, client *bigquery.Client, sql string) ([][]bi
 	return rows, nil
 }
 
-// normalize は []bigquery.Value を比較しやすい文字列スライスに変換する
 func normalize(row []bigquery.Value) []string {
 	out := make([]string, len(row))
 	for i, v := range row {
@@ -454,120 +527,83 @@ func dumpRows(rows [][]string) string {
 	return sb.String()
 }
 
-// ──────────────────────────────────────────────
-// アサーション (3 種類の変換パターン)
-// ──────────────────────────────────────────────
-
-type assertion func(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string)
-
-func tsStr(ts time.Time) string {
-	return ts.UTC().Format(tsLayout)
-}
-
-func assertDropCol(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
+// assertCleansedResult は全変換チェーン後のテーブルを検証する。
+// 期待: 3 行 (id ∈ {1,2,4}), カラム { id, name, event_at_jst }
+func assertCleansedResult(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
 	t.Helper()
-	sql := fmt.Sprintf("SELECT id, name, event_at_utc FROM `%s` ORDER BY id", fqTable)
+	sql := fmt.Sprintf("SELECT id, name, event_at_jst FROM `%s` ORDER BY id", fqTable)
 	rows, err := queryRows(ctx, client, sql)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-
-	want := [][]string{
-		{"1", "Alice", tsStr(inputUTC[1])},
-		{"2", "Bob", tsStr(inputUTC[2])},
-		{"3", "<nil>", tsStr(inputUTC[3])},
-		{"4", "Dave", tsStr(inputUTC[4])},
-		{"5", "<nil>", tsStr(inputUTC[5])},
-	}
 	got := normalizeAll(rows)
-	if !equalRows(want, got) {
-		t.Fatalf("drop_col mismatch:\nwant:\n%sgot:\n%s", dumpRows(want), dumpRows(got))
+	if !equalRows(wantCleansed, got) {
+		t.Fatalf("mismatch:\nwant:\n%sgot:\n%s", dumpRows(wantCleansed), dumpRows(got))
 	}
-}
-
-func assertUtcJst(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
-	t.Helper()
-	sql := fmt.Sprintf("SELECT id, name, secret, event_at_jst FROM `%s` ORDER BY id", fqTable)
-	rows, err := queryRows(ctx, client, sql)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-
-	want := [][]string{
-		{"1", "Alice", "foo", tsStr(plus9h(inputUTC[1]))},
-		{"2", "Bob", "bar", tsStr(plus9h(inputUTC[2]))},
-		{"3", "<nil>", "baz", tsStr(plus9h(inputUTC[3]))},
-		{"4", "Dave", "qux", tsStr(plus9h(inputUTC[4]))},
-		{"5", "<nil>", "quux", tsStr(plus9h(inputUTC[5]))},
-	}
-	got := normalizeAll(rows)
-	if !equalRows(want, got) {
-		t.Fatalf("utc_jst mismatch:\nwant:\n%sgot:\n%s", dumpRows(want), dumpRows(got))
-	}
-}
-
-func assertNullDrop(t *testing.T, ctx context.Context, client *bigquery.Client, fqTable string) {
-	t.Helper()
-	sql := fmt.Sprintf("SELECT id, name, secret, event_at_utc FROM `%s` ORDER BY id", fqTable)
-	rows, err := queryRows(ctx, client, sql)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-
-	want := [][]string{
-		{"1", "Alice", "foo", tsStr(inputUTC[1])},
-		{"2", "Bob", "bar", tsStr(inputUTC[2])},
-		{"4", "Dave", "qux", tsStr(inputUTC[4])},
-	}
-	got := normalizeAll(rows)
-	if !equalRows(want, got) {
-		t.Fatalf("null_drop mismatch:\nwant:\n%sgot:\n%s", dumpRows(want), dumpRows(got))
-	}
-}
-
-var assertionByPattern = map[string]assertion{
-	"drop_col":  assertDropCol,
-	"utc_jst":   assertUtcJst,
-	"null_drop": assertNullDrop,
 }
 
 // ──────────────────────────────────────────────
 // メインのテストケース
 // ──────────────────────────────────────────────
 
-var allFormats = []string{"csv", "tsv", "json", "csv_gz", "csv_python"}
+// allFormats は並列起動する成功パイプラインの format 識別子。
+// csv_dated は Mode A (明示パラメータ) として参加する。
+// csv_required_fail は失敗を期待するので別扱い。
+var allFormats = []string{"csv", "tsv", "json", "csv_gz", "csv_python", "csv_dated"}
 
 func TestDataflowGcsToBq(t *testing.T) {
 	ctx := context.Background()
 	tf := getTerraformOutputs(t)
 
-	// SetUp: フィクスチャアップロード + 全テーブル truncate
-	uploadFixtures(t, ctx, tf)
-	truncateAllTables(t, ctx, tf)
+	bqClient, err := bigquery.NewClient(ctx, tf.ProjectID)
+	if err != nil {
+		t.Fatalf("bq client: %v", err)
+	}
+	defer bqClient.Close()
 
-	// 5 ジョブを並列起動
+	today := time.Now().UTC().Format("20060102")
+	t.Logf("test date (UTC): %s", today)
+
+	// ── Setup ──
+	uploadFixtures(t, ctx, tf)
+	uploadDatedSample(t, ctx, tf, today)
+	createAllTables(t, ctx, bqClient, tf.DatasetID, today)
+	defer func() {
+		if !t.Failed() {
+			dropAllTables(t, ctx, bqClient, tf.DatasetID, today)
+		} else {
+			t.Logf("test failed: leaving tables for debugging")
+		}
+		deleteDatedSample(t, ctx, tf, today)
+	}()
+
+	// ── 成功パイプライン 6 本を並列起動 ──
 	jobIDs := make(map[string]string, len(allFormats))
-	var jobMu sync.Mutex
-	var launchWg sync.WaitGroup
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	var launchErrs []error
 
 	for _, f := range allFormats {
-		launchWg.Add(1)
+		wg.Add(1)
 		go func(format string) {
-			defer launchWg.Done()
-			id, err := launchYamlPipeline(t, tf, format)
-			jobMu.Lock()
-			defer jobMu.Unlock()
+			defer wg.Done()
+			opts := launchOpts{}
+			if format == "csv_dated" {
+				opts.today = today
+				opts.passYyyymmdd = true
+			}
+			id, err := launchYamlPipeline(t, tf, format, opts)
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
 				launchErrs = append(launchErrs, fmt.Errorf("launch %s: %w", format, err))
 				return
 			}
 			jobIDs[format] = id
-			t.Logf("launched %s job: id=%s", format, id)
+			t.Logf("launched %s: id=%s", format, id)
 		}(f)
 	}
-	launchWg.Wait()
-
+	wg.Wait()
 	for _, err := range launchErrs {
 		t.Errorf("%v", err)
 	}
@@ -575,7 +611,14 @@ func TestDataflowGcsToBq(t *testing.T) {
 		t.FailNow()
 	}
 
-	// 全ジョブの完了待機
+	// ── 失敗パイプライン 1 本を起動 (並列の外で) ──
+	failJobID, err := launchYamlPipeline(t, tf, "csv_required_fail", launchOpts{})
+	if err != nil {
+		t.Fatalf("launch csv_required_fail: %v", err)
+	}
+	t.Logf("launched csv_required_fail: id=%s", failJobID)
+
+	// ── 成功ジョブの完了待機 ──
 	var waitWg sync.WaitGroup
 	var waitMu sync.Mutex
 	var waitErrs []error
@@ -587,14 +630,13 @@ func TestDataflowGcsToBq(t *testing.T) {
 			waitMu.Lock()
 			defer waitMu.Unlock()
 			if err != nil {
-				waitErrs = append(waitErrs, fmt.Errorf("wait %s (%s): %w", format, jobID, err))
+				waitErrs = append(waitErrs, fmt.Errorf("%s (%s): %w", format, jobID, err))
 				return
 			}
-			t.Logf("job %s for format=%s ended in state=%s", jobID, format, state)
+			t.Logf("job %s (%s) ended in state=%s", format, jobID, state)
 		}(f, id)
 	}
 	waitWg.Wait()
-
 	for _, err := range waitErrs {
 		t.Errorf("%v", err)
 	}
@@ -602,50 +644,59 @@ func TestDataflowGcsToBq(t *testing.T) {
 		t.FailNow()
 	}
 
-	// 15 ケースをアサーション
-	bqClient, err := bigquery.NewClient(ctx, tf.ProjectID)
-	if err != nil {
-		t.Fatalf("bq client: %v", err)
+	// ── 成功パイプラインのアサーション (6 ケース) ──
+	resultTables := []string{
+		"csv_result", "tsv_result", "json_result",
+		"csv_gz_result", "csv_python_result",
+		fmt.Sprintf("csv_dated_%s_result", today),
 	}
-	defer bqClient.Close()
+	sort.Strings(resultTables)
 
-	keys := make([]string, 0, len(tf.DestinationTables))
-	for k := range tf.DestinationTables {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for _, key := range keys {
-		key := key
-		// key は "{format}_{pattern}" 形式
-		format, pattern := splitFormatPattern(key)
-		assertFn, ok := assertionByPattern[pattern]
-		if !ok {
-			t.Errorf("unknown pattern in table key: %s", key)
-			continue
-		}
-
-		fqTable := fmt.Sprintf("%s.%s.%s", tf.ProjectID, tf.DatasetID, tf.DestinationTables[key])
-		subname := fmt.Sprintf("format=%s/pattern=%s", format, pattern)
-		t.Run(subname, func(t *testing.T) {
-			assertFn(t, ctx, bqClient, fqTable)
+	for _, tableID := range resultTables {
+		tableID := tableID
+		fqTable := fmt.Sprintf("%s.%s.%s", tf.ProjectID, tf.DatasetID, tableID)
+		t.Run("modeA/"+tableID, func(t *testing.T) {
+			assertCleansedResult(t, ctx, bqClient, fqTable)
 		})
 	}
 
-	// TearDown: 後片付け (テストが通った場合のみ。失敗時はデバッグのため残す)
-	if !t.Failed() {
-		truncateAllTables(t, ctx, tf)
+	if t.Failed() {
+		return
 	}
-}
 
-// "csv_drop_col" -> ("csv", "drop_col")
-// "csv_gz_utc_jst" -> ("csv_gz", "utc_jst")
-// "csv_python_null_drop" -> ("csv_python", "null_drop")
-func splitFormatPattern(key string) (format string, pattern string) {
-	for _, p := range []string{"drop_col", "utc_jst", "null_drop"} {
-		if strings.HasSuffix(key, "_"+p) {
-			return strings.TrimSuffix(key, "_"+p), p
+	// ── csv_dated Mode B (jinja 変数なし) ──
+	t.Run("modeB/csv_dated", func(t *testing.T) {
+		datedTableID := fmt.Sprintf("csv_dated_%s_result", today)
+		truncateTable(t, ctx, bqClient, tf.ProjectID, tf.DatasetID, datedTableID)
+
+		jobID, err := launchYamlPipeline(t, tf, "csv_dated", launchOpts{
+			today:        today,
+			passYyyymmdd: false,
+		})
+		if err != nil {
+			t.Fatalf("launch Mode B: %v", err)
 		}
-	}
-	return "", key
+		t.Logf("launched csv_dated Mode B: id=%s", jobID)
+
+		state, err := waitForJob(ctx, tf.ProjectID, tf.Region, jobID)
+		if err != nil {
+			t.Fatalf("wait Mode B (%s): %v", jobID, err)
+		}
+		t.Logf("csv_dated Mode B ended in state=%s", state)
+
+		fqTable := fmt.Sprintf("%s.%s.%s", tf.ProjectID, tf.DatasetID, datedTableID)
+		assertCleansedResult(t, ctx, bqClient, fqTable)
+	})
+
+	// ── 失敗パイプラインのアサーション: JOB_STATE_FAILED を期待 ──
+	t.Run("expected_failure/csv_required_fail", func(t *testing.T) {
+		state, err := waitForJob(ctx, tf.ProjectID, tf.Region, failJobID)
+		if err == nil {
+			t.Fatalf("expected csv_required_fail to FAIL but got state=%s", state)
+		}
+		if state != "JOB_STATE_FAILED" {
+			t.Fatalf("expected JOB_STATE_FAILED but got state=%s, err=%v", state, err)
+		}
+		t.Logf("csv_required_fail correctly ended in JOB_STATE_FAILED: %v", err)
+	})
 }

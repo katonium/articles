@@ -26,9 +26,5 @@ output "yaml_pipeline_gcs_paths" {
   }
 }
 
-# Go テストはこのマップから (format, pattern) -> table_id を解決する
-output "destination_tables" {
-  value = {
-    for k, _ in local.table_specs : k => google_bigquery_table.destinations[k].table_id
-  }
-}
+# 宛先テーブル (静的 15 + dated 3) は Go test が create / drop するため
+# ここでは output しない。テーブル一覧とスキーマ定義は Go 側で管理する。

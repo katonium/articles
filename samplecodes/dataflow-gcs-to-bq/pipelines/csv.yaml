@@ -1,21 +1,11 @@
-# Beam YAML パイプライン: CSV → BigQuery
+# Beam YAML パイプライン: CSV → BigQuery (全変換ステップをチェーン)
 #
-# 1 つの GCS CSV ファイルを読み込み、3 つの SQL 変換 (drop_col / utc_jst / null_drop) に
-# 分岐させて、それぞれ別の BigQuery テーブルに書き込む。
+# 1 つのパイプラインで 3 つの変換ステップを順番に通す:
+#   1. カラム削除 (secret を除外) + UTC→JST 変換
+#   2. NULL 行除去 (name IS NOT NULL)
+#   3. BigQuery に書き込み
 #
-# Jinja 変数:
-#   input_path: gs://bucket/input/sample.csv
-#   project:    BigQuery プロジェクト ID
-#   dataset:    BigQuery データセット ID
-#   prefix:     宛先テーブルのプレフィックス (例: csv)
-#
-# 起動例:
-#   gcloud dataflow yaml run csv-job \
-#     --yaml-pipeline-file=gs://bucket/pipelines/csv.yaml \
-#     --jinja-variables='{"input_path":"gs://bucket/input/sample.csv","project":"my-proj","dataset":"ds","prefix":"csv"}' \
-#     --region=us-central1 \
-#     --service-account-email=df-worker@... \
-#     --temp-location=gs://bucket/temp/
+# 最終出力: { id, name, event_at_jst } × 3 行 (name が非 NULL の行のみ)
 
 pipeline:
   type: composite
@@ -25,65 +15,32 @@ pipeline:
       config:
         path: "{{ input_path }}"
 
-    # ── ブランチ 1: drop_col (secret 列を削除) ──
+    # Step 1: secret カラム削除 + event_at_utc を JST に変換
     - type: Sql
-      name: DropCol
+      name: DropColAndConvert
       input: Read
       config:
         query: |
           SELECT
             CAST(id AS BIGINT) AS id,
             name,
-            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
-          FROM PCOLLECTION
-
-    - type: WriteToBigQuery
-      name: WriteDropCol
-      input: DropCol
-      config:
-        table: "{{ project }}.{{ dataset }}.{{ prefix }}_drop_col"
-        create_disposition: CREATE_NEVER
-        write_disposition: WRITE_APPEND
-
-    # ── ブランチ 2: utc_jst (event_at_utc を UTC+9 して event_at_jst に変換) ──
-    - type: Sql
-      name: UtcJst
-      input: Read
-      config:
-        query: |
-          SELECT
-            CAST(id AS BIGINT) AS id,
-            name,
-            secret,
             TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
           FROM PCOLLECTION
 
-    - type: WriteToBigQuery
-      name: WriteUtcJst
-      input: UtcJst
-      config:
-        table: "{{ project }}.{{ dataset }}.{{ prefix }}_utc_jst"
-        create_disposition: CREATE_NEVER
-        write_disposition: WRITE_APPEND
-
-    # ── ブランチ 3: null_drop (name が NULL の行を除去) ──
+    # Step 2: name が NULL の行を除去
     - type: Sql
-      name: NullDrop
-      input: Read
+      name: FilterNulls
+      input: DropColAndConvert
       config:
         query: |
-          SELECT
-            CAST(id AS BIGINT) AS id,
-            name,
-            secret,
-            CAST(event_at_utc AS TIMESTAMP) AS event_at_utc
+          SELECT id, name, event_at_jst
           FROM PCOLLECTION
           WHERE name IS NOT NULL
 
     - type: WriteToBigQuery
-      name: WriteNullDrop
-      input: NullDrop
+      name: Write
+      input: FilterNulls
       config:
-        table: "{{ project }}.{{ dataset }}.{{ prefix }}_null_drop"
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
         create_disposition: CREATE_NEVER
         write_disposition: WRITE_APPEND
