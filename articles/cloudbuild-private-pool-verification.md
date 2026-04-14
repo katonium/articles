@@ -97,6 +97,52 @@ https://cloud.google.com/build/docs/private-pools/set-up-private-pool-to-use-in-
 
 https://cloud.google.com/vpc/docs/private-services-access
 
+### Cloud Functions / Cloud Run functions との連携
+
+Cloud Functions のデプロイ時に暗黙的に実行される Cloud Build のビルドステップにも、プライベートプールを指定できます。GCS zip ソースからのデプロイでも利用可能です。
+
+**2nd gen** (`google_cloudfunctions2_function`):
+```hcl
+build_config {
+  worker_pool = google_cloudbuild_worker_pool.pool.id  # build_config 内で指定
+  source {
+    storage_source {
+      bucket = google_storage_bucket.source.name
+      object = google_storage_bucket_object.zip.name
+    }
+  }
+}
+```
+
+**1st gen** (`google_cloudfunctions_function`):
+```hcl
+resource "google_cloudfunctions_function" "fn" {
+  build_worker_pool = google_cloudbuild_worker_pool.pool.id  # トップレベルで指定
+}
+```
+
+属性名が世代で異なる点に注意（`worker_pool` vs `build_worker_pool`）。クロスプロジェクトで使う場合は、Cloud Functions Service Agent (`service-PROJECT_NUMBER@gcf-admin-robot.iam.gserviceaccount.com`) に `roles/cloudbuild.workerPoolUser` の付与が必要です。
+
+https://cloud.google.com/sdk/gcloud/reference/functions/deploy
+
+https://cloud.google.com/run/docs/configuring/services/build-worker-pools
+
+https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloudfunctions2_function
+
+### Cloud Build Service Agent への SA 権限付与
+
+カスタムSAでビルドを実行する場合、Cloud Build Service Agent (`service-PROJECT_NUMBER@gcp-sa-cloudbuild.iam.gserviceaccount.com`) に対象SAの `roles/iam.serviceAccountUser` を付与する必要があります。
+
+```hcl
+resource "google_service_account_iam_member" "agent_act_as_sa" {
+  service_account_id = google_service_account.build_sa.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:service-${data.google_project.main.number}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+}
+```
+
+これはSAごとに個別に付与が必要です。SA数が多い環境では、プロジェクトレベルで `roles/iam.serviceAccountUser` を付与する方法もありますが、最小権限の原則に反するためセキュリティとのトレードオフになります。代替として、SAを特定の命名規則でグループ化し、Terraform の `for_each` で一括管理するのが現実的な運用パターンです。
+
 ## 検証環境の構成
 
 ### Terraform で構築するリソース
