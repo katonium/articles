@@ -99,6 +99,8 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, steps []*cloudb
 			},
 			// Private Pool + Custom SA では CLOUD_LOGGING_ONLY が必要
 			Logging: cloudbuildpb.BuildOptions_CLOUD_LOGGING_ONLY,
+			// bash 側の ${VAR} を Cloud Build の substitution として解釈させない
+			SubstitutionOption: cloudbuildpb.BuildOptions_ALLOW_LOOSE,
 		},
 		ServiceAccount: fmt.Sprintf("projects/%s/serviceAccounts/%s", o.ProjectID, o.BuildSAEmail),
 		Timeout:        durationpb.New(15 * time.Minute),
@@ -156,11 +158,13 @@ func TestVPCSCPrivatePool_DockerBuild(t *testing.T) {
 	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
 	pushImage := fmt.Sprintf("%s/%s/%s/vpcsc-test:%s", dockerHost, o.ProjectID, o.BuildOutputRepo, o.Suffix)
 
-	pipIndexTmpl := fmt.Sprintf("https://oauth2accesstoken:${TOKEN}@%s/%s/%s/simple/",
+	// Cloud Build は build step の args 中の $VAR / ${VAR} を substitution として解釈し、
+	// built-in 変数でないと validation で弾く。bash 側の変数として透過させるため $$ でエスケープする。
+	pipIndexTmpl := fmt.Sprintf("https://oauth2accesstoken:$${TOKEN}@%s/%s/%s/simple/",
 		pypiHost, o.ProjectID, o.PyPIMirror)
 
 	step1Script := fmt.Sprintf(`set -euo pipefail
-TOKEN=$(curl -fsS -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+TOKEN=$$(curl -fsS -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 pip install --no-cache-dir --index-url "%s" requests
 python -c "import requests; print('requests version:', requests.__version__)"
 `, pipIndexTmpl)

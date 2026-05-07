@@ -4,6 +4,7 @@
 
 project_id = "REPLACE_WITH_PROJECT_ID"
 folder_id  = "REPLACE_WITH_FOLDER_NUMBER"
+org_id     = "REPLACE_WITH_ORG_NUMBER"
 region     = "asia-northeast1"
 
 # Ingress ポリシーで許可する identity。例:

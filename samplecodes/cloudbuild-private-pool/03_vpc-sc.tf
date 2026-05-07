@@ -7,7 +7,7 @@
 # ──────────────────────────────────────────────
 
 resource "google_access_context_manager_access_policy" "folder" {
-  parent = "folders/${var.folder_id}"
+  parent = "organizations/${var.org_id}"
   title  = "vpc-sc-cb-private-pool-verify-${local.suffix}"
   scopes = ["folders/${var.folder_id}"]
 }

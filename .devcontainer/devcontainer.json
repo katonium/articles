@@ -1,29 +1,18 @@
 {
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "postCreateCommand": "bash ./.devcontainer/postCreate.sh",
   "customizations": {
-    "codespaces": {
-      "repositories": {
-        "katonium/articles": {
-          "permissions": {
-            "contents": "write",
-            "pull_requests": "write"
-          },
-          "katonium/k8s-playground": {
-            "permissions": {
-              "contents": "write",
-              "pull_requests": "write"
-            }
-          }            
-        }
-      }
-    },
     "vscode": {
       "extensions": [
-        "GitHub.copilot-chat",
-        "GitHub.copilot",
+        "golang.go",
         "task.vscode-task",
+        "redhat.vscode-yaml",
         "jebbs.plantuml"
+
       ]
     }
-  }
+  },
+  "forwardPorts": [],
+  "mounts": []
 }
 

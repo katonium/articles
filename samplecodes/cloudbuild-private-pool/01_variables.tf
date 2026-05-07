@@ -8,6 +8,17 @@ variable "folder_id" {
   type        = string
 }
 
+variable "org_id" {
+  description = <<EOT
+Access Policy 作成のため、フォルダの親 Organization の数値 ID。
+scoped access policy は parent=organizations/<id> 必須、
+scopes=[folders/<folder_id>] で当該フォルダ配下のみに作用する。
+terraform.tfvars (gitignored) でのみ指定する。
+EOT
+  type        = string
+  sensitive   = true
+}
+
 variable "region" {
   description = "GCP リージョン"
   type        = string
