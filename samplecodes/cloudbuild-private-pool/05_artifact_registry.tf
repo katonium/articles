@@ -48,6 +48,26 @@ resource "google_artifact_registry_repository" "pypi_mirror" {
   depends_on = [google_project_service.enabled]
 }
 
+# ──────────────────────────────────────────────
+# AR VPC-SC Config
+#
+# default は DENY で、 perimeter 内 AR の REMOTE repo は upstream 公開ソース
+# (Docker Hub / PyPI) に到達できずキャッシュが空になる。 ALLOW にすると
+# AR backend が perimeter 越しに upstream へ fetch できる組み込み穴になる。
+# perimeter の egressPolicies を直接いじるよりこちらが王道。
+#
+# project × location 単位の設定 (= 当該 region 内の全 AR repo に適用)。
+# ──────────────────────────────────────────────
+
+resource "google_artifact_registry_vpcsc_config" "main" {
+  provider     = google-beta
+  project      = var.project_id
+  location     = var.region
+  vpcsc_policy = "ALLOW"
+
+  depends_on = [google_project_service.enabled]
+}
+
 resource "google_artifact_registry_repository" "build_output" {
   project       = var.project_id
   location      = var.region

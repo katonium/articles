@@ -33,6 +33,17 @@ resource "google_artifact_registry_repository_iam_member" "build_sa_reader_docke
   member     = "serviceAccount:${google_service_account.build.email}"
 }
 
+# Build step.name に AR image を指定した場合、worker の docker daemon は
+# Cloud Build Service Agent (P4SA) の credential で pull する。よって P4SA
+# にも mirror の reader 権限が必要。
+resource "google_artifact_registry_repository_iam_member" "p4sa_reader_dockerhub" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.dockerhub_mirror.location
+  repository = google_artifact_registry_repository.dockerhub_mirror.name
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${local.cb_agent_sa}"
+}
+
 resource "google_artifact_registry_repository_iam_member" "build_sa_reader_pypi" {
   project    = var.project_id
   location   = google_artifact_registry_repository.pypi_mirror.location

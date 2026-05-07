@@ -158,39 +158,49 @@ func TestVPCSCPrivatePool_DockerBuild(t *testing.T) {
 	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
 	pushImage := fmt.Sprintf("%s/%s/%s/vpcsc-test:%s", dockerHost, o.ProjectID, o.BuildOutputRepo, o.Suffix)
 
-	// Cloud Build は build step の args 中の $VAR / ${VAR} を substitution として解釈し、
-	// built-in 変数でないと validation で弾く。bash 側の変数として透過させるため $$ でエスケープする。
-	pipIndexTmpl := fmt.Sprintf("https://oauth2accesstoken:$${TOKEN}@%s/%s/%s/simple/",
-		pypiHost, o.ProjectID, o.PyPIMirror)
+	// 単一 step。step.name に AR mirror image を指定すると worker daemon の認証導線
+	// (P4SA / hidden agent) が絡んで pull denied になりやすいため、step.name は
+	// google-managed の gcr.io/cloud-builders/docker で固定し、AR mirror へのアクセスは
+	// すべて step 内の docker daemon (= build SA 認証) で行う。
+	//
+	// $$ は Cloud Build の substitution エスケープ。Cloud Build がパース後に $ 1 個になり、
+	// bash や Dockerfile の変数展開として機能する。
+	// 王道: Cloud Build worker docker daemon は同 project の Artifact Registry に
+	// auto-auth (build SA の identity)。docker login / gcloud auth configure-docker
+	// は不要で、不適切に呼ぶと書き込み先と daemon の credential 経路がずれて壊れる。
+	// PyPI mirror への pip install だけは Dockerfile の RUN 内なので、別途 metadata
+	// server から build SA の token を取って --build-arg 経由で渡す。
+	script := fmt.Sprintf(`set -euo pipefail
 
-	step1Script := fmt.Sprintf(`set -euo pipefail
-TOKEN=$$(curl -fsS -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-pip install --no-cache-dir --index-url "%s" requests
-python -c "import requests; print('requests version:', requests.__version__)"
-`, pipIndexTmpl)
+TOKEN=$$(curl -fsS -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+test -n "$${TOKEN}" || { echo "metadata token empty"; exit 1; }
 
-	step2Script := fmt.Sprintf(`set -euo pipefail
 cat > Dockerfile <<'EOF'
 FROM %s
-RUN python -c "print('hello from VPC-SC build')"
+ARG PIP_INDEX
+RUN pip install --no-cache-dir --index-url "$${PIP_INDEX}" requests \
+ && python -c "import requests; print('requests version:', requests.__version__)"
 CMD ["python", "-c", "print('image built inside VPC-SC')"]
 EOF
-docker build -t %s .
+
+docker build \
+  --build-arg "PIP_INDEX=https://oauth2accesstoken:$${TOKEN}@%s/%s/%s/simple/" \
+  -t %s .
 docker push %s
-`, baseImage, pushImage, pushImage)
+`,
+		baseImage,
+		pypiHost, o.ProjectID, o.PyPIMirror,
+		pushImage, pushImage,
+	)
 
 	steps := []*cloudbuildpb.BuildStep{
 		{
-			Id:         "pip-install-via-pypi-mirror",
-			Name:       baseImage,
-			Entrypoint: "bash",
-			Args:       []string{"-c", step1Script},
-		},
-		{
-			Id:         "docker-build-and-push",
+			Id:         "build-via-mirrors-and-push",
 			Name:       "gcr.io/cloud-builders/docker",
 			Entrypoint: "bash",
-			Args:       []string{"-c", step2Script},
+			Args:       []string{"-c", script},
 		},
 	}
 
@@ -216,12 +226,11 @@ func TestVPCSCPrivatePool_ExternalAccessDenied(t *testing.T) {
 	ctx := context.Background()
 	o := getTerraformOutputs(t)
 
-	dockerHost := fmt.Sprintf("%s-docker.pkg.dev", o.Region)
-	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
-
+	// step.name は google-managed の builder image にし、テスト本体 (curl) を step 内で実行する。
+	// これにより、step.name pull の失敗で誤って「外部遮断成功」と判定される事故を避ける。
 	script := `set -euo pipefail
-# 公式 PyPI に直アクセス。FW で 0.0.0.0/0 への egress は deny されているため失敗するはず。
-# connect-timeout を短くして高速 fail。
+# 公式 PyPI への直アクセス。FW で 0.0.0.0/0 への egress は restricted VIP 以外
+# deny されているため、connect timeout して非ゼロ終了するはず。
 curl --connect-timeout 10 -fsS https://pypi.org/simple/ -o /tmp/idx.html
 echo "ERROR: should not reach here"
 exit 1
@@ -230,7 +239,7 @@ exit 1
 	steps := []*cloudbuildpb.BuildStep{
 		{
 			Id:         "external-access-should-fail",
-			Name:       baseImage,
+			Name:       "gcr.io/cloud-builders/docker",
 			Entrypoint: "bash",
 			Args:       []string{"-c", script},
 		},
