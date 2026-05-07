@@ -1,30 +1,26 @@
-.PHONY: init plan apply test report destroy all clean
+.PHONY: init plan apply test report destroy clean check-tfvars
 
-check-env:
-ifndef GOOGLE_CLOUD_PROJECT
-	$(error GOOGLE_CLOUD_PROJECT is not set)
-endif
+check-tfvars:
+	@test -f terraform.tfvars || (echo "terraform.tfvars not found. Copy terraform.tfvars.example and edit." && exit 1)
 
 init:
 	terraform init
 
-plan: check-env
-	terraform plan -var="project_id=$(GOOGLE_CLOUD_PROJECT)"
+plan: check-tfvars
+	terraform plan
 
-apply: check-env
-	terraform apply -auto-approve -var="project_id=$(GOOGLE_CLOUD_PROJECT)"
+apply: check-tfvars
+	terraform apply -auto-approve
 
-test: check-env
-	go test -v -timeout 600s ./...
+test: check-tfvars
+	go test -v -timeout 1800s ./...
 
-report: check-env
-	go test -v -timeout 600s -json ./... | \
-	go-test-report -o test-report.html -t "Cloud Build Private Pool 仕様検証レポート"
+report: check-tfvars
+	go test -v -timeout 1800s -json ./... | \
+		go-test-report -o test-report.html -t "VPC-SC Cloud Build Private Pool 仕様検証レポート"
 
-destroy: check-env
-	terraform destroy -auto-approve -var="project_id=$(GOOGLE_CLOUD_PROJECT)"
+destroy: check-tfvars
+	terraform destroy -auto-approve
 
-all: apply report destroy
-
-clean: destroy
-	rm -rf .terraform terraform.tfstate terraform.tfstate.backup
+clean:
+	rm -rf .terraform terraform.tfstate terraform.tfstate.backup test-report.html

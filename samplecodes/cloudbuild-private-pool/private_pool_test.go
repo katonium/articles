@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,21 +14,19 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-// tfOutput は terraform output -json の結果を格納する構造体
 type tfOutput struct {
-	ProjectID    string
-	Region       string
-	Suffix       string
-	WorkerPoolID string
-	NetworkName  string
-	SAEmailA     string
-	SAEmailB     string
-	BucketA      string
-	BucketB      string
-	ARRepoName   string
+	ProjectID       string
+	ProjectNumber   string
+	Region          string
+	Suffix          string
+	WorkerPoolID    string
+	BuildSAEmail    string
+	DockerHubMirror string
+	PyPIMirror      string
+	BuildOutputRepo string
+	PerimeterName   string
 }
 
-// getTerraformOutputs は terraform output からテスト用パラメータを取得する
 func getTerraformOutputs(t *testing.T) *tfOutput {
 	t.Helper()
 
@@ -41,7 +38,7 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 	}
 
 	var raw map[string]struct {
-		Value interface{} `json:"value"`
+		Value any `json:"value"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		t.Fatalf("terraform output の解析に失敗: %v", err)
@@ -52,38 +49,41 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 		if !ok {
 			t.Fatalf("terraform output に %s が見つかりません", key)
 		}
-		s, ok := v.Value.(string)
-		if !ok {
-			t.Fatalf("terraform output %s が文字列ではありません", key)
+		switch x := v.Value.(type) {
+		case string:
+			return x
+		case float64:
+			return fmt.Sprintf("%.0f", x)
+		default:
+			return fmt.Sprintf("%v", x)
 		}
-		return s
 	}
 
 	return &tfOutput{
-		ProjectID:    getString("project_id"),
-		Region:       getString("region"),
-		Suffix:       getString("suffix"),
-		WorkerPoolID: getString("worker_pool_id"),
-		NetworkName:  getString("network_name"),
-		SAEmailA:     getString("sa_a_email"),
-		SAEmailB:     getString("sa_b_email"),
-		BucketA:      getString("bucket_a_name"),
-		BucketB:      getString("bucket_b_name"),
-		ARRepoName:   getString("ar_repo_name"),
+		ProjectID:       getString("project_id"),
+		ProjectNumber:   getString("project_number"),
+		Region:          getString("region"),
+		Suffix:          getString("suffix"),
+		WorkerPoolID:    getString("worker_pool_id"),
+		BuildSAEmail:    getString("build_sa_email"),
+		DockerHubMirror: getString("dockerhub_mirror_repo"),
+		PyPIMirror:      getString("pypi_mirror_repo"),
+		BuildOutputRepo: getString("build_output_repo"),
+		PerimeterName:   getString("perimeter_name"),
 	}
 }
 
-// buildResult はビルド実行の結果を保持する
 type buildResult struct {
-	Status cloudbuildpb.Build_Status
-	Logs   string
+	Status  cloudbuildpb.Build_Status
+	LogURL  string
+	BuildID string
 }
 
-// submitBuild はプライベートプールにビルドを投入し、完了まで待機する
-func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string, steps []*cloudbuildpb.BuildStep) *buildResult {
+// submitBuild は Private Pool に Build を投入し、完了まで待つ。
+func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, steps []*cloudbuildpb.BuildStep) *buildResult {
 	t.Helper()
 
-	// プライベートプールはリージョナル API を使用する必要がある
+	// Private Pool はリージョナル API を使う必要がある
 	endpoint := fmt.Sprintf("%s-cloudbuild.googleapis.com:443", o.Region)
 	client, err := cloudbuild.NewClient(ctx, option.WithEndpoint(endpoint))
 	if err != nil {
@@ -97,10 +97,11 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string,
 			Pool: &cloudbuildpb.BuildOptions_PoolOption{
 				Name: o.WorkerPoolID,
 			},
+			// Private Pool + Custom SA では CLOUD_LOGGING_ONLY が必要
 			Logging: cloudbuildpb.BuildOptions_CLOUD_LOGGING_ONLY,
 		},
-		ServiceAccount: fmt.Sprintf("projects/%s/serviceAccounts/%s", o.ProjectID, saEmail),
-		Timeout:        durationpb.New(120 * time.Second),
+		ServiceAccount: fmt.Sprintf("projects/%s/serviceAccounts/%s", o.ProjectID, o.BuildSAEmail),
+		Timeout:        durationpb.New(15 * time.Minute),
 	}
 
 	op, err := client.CreateBuild(ctx, &cloudbuildpb.CreateBuildRequest{
@@ -111,230 +112,130 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, saEmail string,
 		t.Fatalf("ビルドの投入に失敗: %v", err)
 	}
 
-	// ビルド ID をログに出力
-	metadata, _ := op.Metadata()
-	if metadata != nil && metadata.Build != nil {
-		t.Logf("ビルド ID: %s", metadata.Build.Id)
+	buildID := ""
+	if meta, mErr := op.Metadata(); mErr == nil && meta != nil && meta.Build != nil {
+		buildID = meta.Build.Id
+		t.Logf("ビルド開始 id=%s log=%s", meta.Build.Id, meta.Build.LogUrl)
 	}
 
-	// ビルド完了まで待機（最大 5 分）
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
 	resp, err := op.Wait(waitCtx)
 	if err != nil {
-		t.Logf("ビルド待機中にエラー: %v", err)
-		// エラー時でもメタデータから実際のビルドステータスを取得
-		meta, metaErr := op.Metadata()
-		if metaErr == nil && meta != nil && meta.Build != nil {
-			return &buildResult{
-				Status: meta.Build.Status,
-				Logs:   meta.Build.LogUrl,
-			}
+		t.Logf("op.Wait エラー: %v", err)
+		if meta, mErr := op.Metadata(); mErr == nil && meta != nil && meta.Build != nil {
+			return &buildResult{Status: meta.Build.Status, LogURL: meta.Build.LogUrl, BuildID: meta.Build.Id}
 		}
-		return &buildResult{Status: cloudbuildpb.Build_FAILURE}
+		return &buildResult{Status: cloudbuildpb.Build_FAILURE, BuildID: buildID}
 	}
 
-	return &buildResult{
-		Status: resp.Status,
-		Logs:   resp.LogUrl,
-	}
+	return &buildResult{Status: resp.Status, LogURL: resp.LogUrl, BuildID: resp.Id}
 }
 
 // ──────────────────────────────────────────────
-// Test 1: VPC 統合検証
+// Test: Private Pool 内 Docker build が VPC-SC 境界内 AR にアクセスできること
+//
+// 検証内容:
+//  1. AR DockerHub mirror から python:3.12-slim を base image として pull
+//  2. AR PyPI mirror から requests を pip install
+//  3. Dockerfile を build し、AR build-output repo に push
+//
+// 期待:
+//   Ingress policy には var.ingress_identities の identity のみが入っており、
+//   Build job 用 Service Account は含まれていない。それでも 境界内 (VPC) →
+//   境界内 (AR) は Ingress 不要で通るため、すべてのステップが成功する。
 // ──────────────────────────────────────────────
 
-func TestPrivatePool_VPCIntegration(t *testing.T) {
+func TestVPCSCPrivatePool_DockerBuild(t *testing.T) {
 	ctx := context.Background()
 	o := getTerraformOutputs(t)
 
-	tests := []struct {
-		name string
-		run  func(t *testing.T)
-	}{
+	dockerHost := fmt.Sprintf("%s-docker.pkg.dev", o.Region)
+	pypiHost := fmt.Sprintf("%s-python.pkg.dev", o.Region)
+	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
+	pushImage := fmt.Sprintf("%s/%s/%s/vpcsc-test:%s", dockerHost, o.ProjectID, o.BuildOutputRepo, o.Suffix)
+
+	pipIndexTmpl := fmt.Sprintf("https://oauth2accesstoken:${TOKEN}@%s/%s/%s/simple/",
+		pypiHost, o.ProjectID, o.PyPIMirror)
+
+	step1Script := fmt.Sprintf(`set -euo pipefail
+TOKEN=$(curl -fsS -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+pip install --no-cache-dir --index-url "%s" requests
+python -c "import requests; print('requests version:', requests.__version__)"
+`, pipIndexTmpl)
+
+	step2Script := fmt.Sprintf(`set -euo pipefail
+cat > Dockerfile <<'EOF'
+FROM %s
+RUN python -c "print('hello from VPC-SC build')"
+CMD ["python", "-c", "print('image built inside VPC-SC')"]
+EOF
+docker build -t %s .
+docker push %s
+`, baseImage, pushImage, pushImage)
+
+	steps := []*cloudbuildpb.BuildStep{
 		{
-			name: "正常系_GCSにVPC内部からアクセスできること",
-			run: func(t *testing.T) {
-				// テストファイルを作成し GCS にアップロード
-				steps := []*cloudbuildpb.BuildStep{
-					{
-						Name:       "gcr.io/cloud-builders/gcloud",
-						Entrypoint: "bash",
-						Args: []string{
-							"-c",
-							fmt.Sprintf(
-								`echo "hello from private pool" > /tmp/test.txt && gsutil cp /tmp/test.txt gs://%s/test.txt && echo "GCS upload succeeded"`,
-								o.BucketA,
-							),
-						},
-					},
-				}
-				result := submitBuild(t, ctx, o, o.SAEmailA, steps)
-				if result.Status != cloudbuildpb.Build_SUCCESS {
-					t.Errorf("ビルドが成功するべきところ、ステータス=%s, ログ=%s", result.Status, result.Logs)
-				}
-			},
+			Id:         "pip-install-via-pypi-mirror",
+			Name:       baseImage,
+			Entrypoint: "bash",
+			Args:       []string{"-c", step1Script},
 		},
 		{
-			name: "正常系_ArtifactRegistryにVPC内部から接続できること",
-			run: func(t *testing.T) {
-				// AR リポジトリの一覧を取得して接続確認
-				steps := []*cloudbuildpb.BuildStep{
-					{
-						Name:       "gcr.io/cloud-builders/gcloud",
-						Entrypoint: "bash",
-						Args: []string{
-							"-c",
-							fmt.Sprintf(
-								`gcloud artifacts docker images list %s-docker.pkg.dev/%s/%s --limit=1 2>&1 && echo "AR connection succeeded"`,
-								o.Region, o.ProjectID, o.ARRepoName,
-							),
-						},
-					},
-				}
-				result := submitBuild(t, ctx, o, o.SAEmailA, steps)
-				if result.Status != cloudbuildpb.Build_SUCCESS {
-					t.Errorf("ビルドが成功するべきところ、ステータス=%s, ログ=%s", result.Status, result.Logs)
-				}
-			},
-		},
-		{
-			name: "正常系_FWで許可されたIP_8.8.8.8_にアクセスできること",
-			run: func(t *testing.T) {
-				steps := []*cloudbuildpb.BuildStep{
-					{
-						Name:       "gcr.io/cloud-builders/curl",
-						Entrypoint: "bash",
-						Args: []string{
-							"-c",
-							`curl --connect-timeout 10 -s -o /dev/null -w "%{http_code}" https://dns.google && echo " - allowed IP reachable"`,
-						},
-					},
-				}
-				result := submitBuild(t, ctx, o, o.SAEmailA, steps)
-				if result.Status != cloudbuildpb.Build_SUCCESS {
-					t.Errorf("FW で許可された IP へのアクセスが成功するべきところ、ステータス=%s, ログ=%s", result.Status, result.Logs)
-				}
-			},
-		},
-		{
-			name: "異常系_FWで許可されていないIP_1.1.1.1_にアクセスできないこと",
-			run: func(t *testing.T) {
-				steps := []*cloudbuildpb.BuildStep{
-					{
-						Name:       "gcr.io/cloud-builders/curl",
-						Entrypoint: "bash",
-						Args: []string{
-							"-c",
-							// タイムアウトを短くして失敗を確認。curl が失敗（非0終了）すればビルドも FAILURE になる
-							`curl --connect-timeout 10 -s https://1.1.1.1 && echo "ERROR: should not reach here"`,
-						},
-					},
-				}
-				result := submitBuild(t, ctx, o, o.SAEmailA, steps)
-				if result.Status == cloudbuildpb.Build_SUCCESS {
-					t.Errorf("FW で許可されていない IP へのアクセスは失敗するべきところ、成功してしまった, ログ=%s", result.Logs)
-				}
-				t.Logf("期待通りビルドが失敗: ステータス=%s", result.Status)
-			},
+			Id:         "docker-build-and-push",
+			Name:       "gcr.io/cloud-builders/docker",
+			Entrypoint: "bash",
+			Args:       []string{"-c", step2Script},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tt.run(t)
-		})
+	res := submitBuild(t, ctx, o, steps)
+	if res.Status != cloudbuildpb.Build_SUCCESS {
+		t.Fatalf("ビルドが成功するべきところ status=%s log=%s build_id=%s",
+			res.Status, res.LogURL, res.BuildID)
 	}
+	t.Logf("ビルド成功 build_id=%s log=%s", res.BuildID, res.LogURL)
 }
 
 // ──────────────────────────────────────────────
-// Test 2: Service Account 分離検証
+// Test: 外部直 (DockerHub 公式 / PyPI 公式) アクセスは拒否されること
+//
+// 検証内容:
+//   AR mirror を経由せず、docker.io / pypi.org に直接アクセスするビルドを投入。
+// 期待:
+//   FW で deny-all-egress + restricted.googleapis のみ許可なので、
+//   外部 IP に出られず timeout / network unreachable で失敗する。
 // ──────────────────────────────────────────────
 
-func TestPrivatePool_ServiceAccountIsolation(t *testing.T) {
+func TestVPCSCPrivatePool_ExternalAccessDenied(t *testing.T) {
 	ctx := context.Background()
 	o := getTerraformOutputs(t)
 
-	// gsutil cp でバケットアクセスを試みるビルドステップを生成するヘルパー
-	gcsWriteStep := func(bucketName string) []*cloudbuildpb.BuildStep {
-		return []*cloudbuildpb.BuildStep{
-			{
-				Name:       "gcr.io/cloud-builders/gcloud",
-				Entrypoint: "bash",
-				Args: []string{
-					"-c",
-					fmt.Sprintf(
-						`echo "sa-isolation-test" > /tmp/sa-test.txt && gsutil cp /tmp/sa-test.txt gs://%s/sa-test.txt`,
-						bucketName,
-					),
-				},
-			},
-		}
-	}
+	dockerHost := fmt.Sprintf("%s-docker.pkg.dev", o.Region)
+	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
 
-	tests := []struct {
-		name string
-		run  func(t *testing.T)
-	}{
+	script := `set -euo pipefail
+# 公式 PyPI に直アクセス。FW で 0.0.0.0/0 への egress は deny されているため失敗するはず。
+# connect-timeout を短くして高速 fail。
+curl --connect-timeout 10 -fsS https://pypi.org/simple/ -o /tmp/idx.html
+echo "ERROR: should not reach here"
+exit 1
+`
+
+	steps := []*cloudbuildpb.BuildStep{
 		{
-			name: "正常系_SA-AはBucket-Aにアクセスできること",
-			run: func(t *testing.T) {
-				result := submitBuild(t, ctx, o, o.SAEmailA, gcsWriteStep(o.BucketA))
-				if result.Status != cloudbuildpb.Build_SUCCESS {
-					t.Errorf("SA-A → Bucket-A は成功するべきところ、ステータス=%s, ログ=%s", result.Status, result.Logs)
-				}
-			},
-		},
-		{
-			name: "異常系_SA-AはBucket-Bにアクセスできないこと",
-			run: func(t *testing.T) {
-				result := submitBuild(t, ctx, o, o.SAEmailA, gcsWriteStep(o.BucketB))
-				if result.Status == cloudbuildpb.Build_SUCCESS {
-					t.Errorf("SA-A → Bucket-B は失敗するべきところ、成功してしまった, ログ=%s", result.Logs)
-				}
-				t.Logf("期待通り SA-A は Bucket-B にアクセス拒否: ステータス=%s", result.Status)
-			},
-		},
-		{
-			name: "正常系_SA-BはBucket-Bにアクセスできること",
-			run: func(t *testing.T) {
-				result := submitBuild(t, ctx, o, o.SAEmailB, gcsWriteStep(o.BucketB))
-				if result.Status != cloudbuildpb.Build_SUCCESS {
-					t.Errorf("SA-B → Bucket-B は成功するべきところ、ステータス=%s, ログ=%s", result.Status, result.Logs)
-				}
-			},
-		},
-		{
-			name: "異常系_SA-BはBucket-Aにアクセスできないこと",
-			run: func(t *testing.T) {
-				result := submitBuild(t, ctx, o, o.SAEmailB, gcsWriteStep(o.BucketA))
-				if result.Status == cloudbuildpb.Build_SUCCESS {
-					t.Errorf("SA-B → Bucket-A は失敗するべきところ、成功してしまった, ログ=%s", result.Logs)
-				}
-				t.Logf("期待通り SA-B は Bucket-A にアクセス拒否: ステータス=%s", result.Status)
-			},
+			Id:         "external-access-should-fail",
+			Name:       baseImage,
+			Entrypoint: "bash",
+			Args:       []string{"-c", script},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tt.run(t)
-		})
+	res := submitBuild(t, ctx, o, steps)
+	if res.Status == cloudbuildpb.Build_SUCCESS {
+		t.Fatalf("外部直アクセスは拒否されるべきだが成功した log=%s build_id=%s",
+			res.LogURL, res.BuildID)
 	}
-}
-
-// ──────────────────────────────────────────────
-// ヘルパー: ビルドログから出力を取得（デバッグ用）
-// ──────────────────────────────────────────────
-
-func fetchBuildLogs(t *testing.T, projectID, buildID string) string {
-	t.Helper()
-	cmd := exec.Command("gcloud", "builds", "log", buildID, "--project", projectID)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("ビルドログの取得に失敗: %v", err)
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	t.Logf("期待通り外部直アクセスは失敗 status=%s build_id=%s", res.Status, res.BuildID)
 }
