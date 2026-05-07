@@ -137,7 +137,7 @@ func submitBuild(t *testing.T, ctx context.Context, o *tfOutput, steps []*cloudb
 // Test: Private Pool 内 Docker build が VPC-SC 境界内 AR にアクセスできること
 //
 // 検証内容:
-//  1. AR DockerHub mirror から python:3.12-slim を base image として pull
+//  1. AR DockerHub mirror から python:3.12 を base image として pull
 //  2. AR PyPI mirror から requests を pip install
 //  3. Dockerfile を build し、AR build-output repo に push
 //
@@ -153,7 +153,10 @@ func TestVPCSCPrivatePool_DockerBuild(t *testing.T) {
 
 	dockerHost := fmt.Sprintf("%s-docker.pkg.dev", o.Region)
 	pypiHost := fmt.Sprintf("%s-python.pkg.dev", o.Region)
-	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
+	// python:3.12-slim だと curl が同梱されないため、metadata server 取得用の curl が使える非slim版を使う。
+	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12", dockerHost, o.ProjectID, o.DockerHubMirror)
+	// gcr.io は Private DNS でルーティングしていないため到達不可。AR DockerHub mirror 経由で docker CLI を取得する。
+	dockerBuilder := fmt.Sprintf("%s/%s/%s/library/docker:24-cli", dockerHost, o.ProjectID, o.DockerHubMirror)
 	pushImage := fmt.Sprintf("%s/%s/%s/vpcsc-test:%s", dockerHost, o.ProjectID, o.BuildOutputRepo, o.Suffix)
 
 	pipIndexTmpl := fmt.Sprintf("https://oauth2accesstoken:${TOKEN}@%s/%s/%s/simple/",
@@ -184,7 +187,7 @@ docker push %s
 		},
 		{
 			Id:         "docker-build-and-push",
-			Name:       "gcr.io/cloud-builders/docker",
+			Name:       dockerBuilder,
 			Entrypoint: "bash",
 			Args:       []string{"-c", step2Script},
 		},
@@ -213,10 +216,11 @@ func TestVPCSCPrivatePool_ExternalAccessDenied(t *testing.T) {
 	o := getTerraformOutputs(t)
 
 	dockerHost := fmt.Sprintf("%s-docker.pkg.dev", o.Region)
-	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12-slim", dockerHost, o.ProjectID, o.DockerHubMirror)
+	// curl 同梱の非slim版を使う（slim版には curl が入っていない）。
+	baseImage := fmt.Sprintf("%s/%s/%s/library/python:3.12", dockerHost, o.ProjectID, o.DockerHubMirror)
 
 	script := `set -euo pipefail
-# 公式 PyPI に直アクセス。FW で 0.0.0.0/0 への egress は deny されているため失敗するはず。
+# 公式 PyPI に直アクセス。no_external_ip = true により外部 IP に出られず失敗するはず。
 # connect-timeout を短くして高速 fail。
 curl --connect-timeout 10 -fsS https://pypi.org/simple/ -o /tmp/idx.html
 echo "ERROR: should not reach here"
