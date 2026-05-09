@@ -224,6 +224,27 @@ flowchart LR
 
 注: この期待が逆 (「VPC が居る側に通る」) の場合は新たな知見なので、結果に応じてREADMEを更新する。
 
+#### 現状の知見 (本実装で部分的に確認済み)
+
+Case 4 のフル検証 (build job 投入) には到達していないが、 Terraform apply の
+段階で以下が観測された:
+
+- `google_compute_shared_vpc_service_project.guest_b` (host=base in Perimeter A,
+  service=guest_b in Perimeter B) の作成が **VPC-SC violation** で deny される
+  (`SECURITY_POLICY_VIOLATED` on `compute.googleapis.com`、 cross-perimeter API call)
+- つまり、 cross-perimeter で Shared VPC service association を結ぶこと自体が
+  VPC-SC で deny される。 仮説 (「pool が居る側にしか到達できない」) より上流の
+  setup 段階で deny されていた
+
+**未到達の仮説検証 (deferred)**:
+- guest_b project の reactivation
+- Perimeter B から host (Perimeter A) compute API への Ingress policy 拡張
+- 上記が両方完了して初めて build job 投入の検証が可能
+
+実装上は Case 4 用 Terraform code (`13_guest_b.tf` の AR/pool/IAM、 `11_shared_vpc.tf`
+の guest_b service association) は残してある。 reactivate + Ingress 拡張後に
+再 apply で動作開始予定。
+
 ---
 
 ## ディレクトリ構成 (実装後)
@@ -249,17 +270,17 @@ samplecodes/cloudbuild-private-pool/
 
 ## Test Plan
 
-| Case | テスト関数 | 期待 status |
-|---|---|---|
-| 0 | `TestCase0_BaseInPerimeter_DockerBuildSucceeds` | SUCCESS |
-| 0 (negative) | `TestCase0_BaseInPerimeter_ExternalAccessDenied` | FAILURE |
-| 1 | `TestCase1_NoPeering_DockerBuildFails` | FAILURE |
-| 2a | (Terraform apply で失敗する旨を README に記述、 Go テスト無し) | — |
-| 2b | `TestCase2b_DefaultPeeredRange_DockerBuildSucceeds` | SUCCESS |
-| 3 | `TestCase3_SharedVPC_GuestPool_PullHostAR` | SUCCESS |
-| 3 | `TestCase3_SharedVPC_GuestPool_PullGuestAR` | SUCCESS |
-| 4 | `TestCase4_SplitPerimeter_GuestPool_PullGuestAR` | SUCCESS |
-| 4 | `TestCase4_SplitPerimeter_GuestPool_PullHostAR_Denied` | FAILURE |
+| Case | テスト関数 | 期待 status | 結果 |
+|---|---|---|---|
+| 0 | `TestVPCSCPrivatePool_DockerBuild` | SUCCESS | ✅ PASS |
+| 0 (negative) | `TestVPCSCPrivatePool_ExternalAccessDenied` | FAILURE | ✅ PASS (期待通り FAILURE) |
+| 1 | `TestCase1_NoPeering_DockerBuildFails` | FAILURE | ✅ PASS (期待通り FAILURE) |
+| 2a | (Terraform plan/apply で失敗、Goテスト無し) | — | 未実施 (原理確認のみ) |
+| 2b | `TestCase2b_DefaultPeeredRange_DockerBuildSucceeds` | SUCCESS | ✅ PASS |
+| 3 | `TestCase3_SharedVPC_GuestPool_PullGuestAR` | SUCCESS | ✅ PASS |
+| 3 (cross-AR) | `TestCase3_SharedVPC_GuestPool_PullHostAR` | SUCCESS | ⏸ 未実装 (追加検証候補) |
+| 4 | `TestCase4_SplitPerimeter_GuestPool_PullGuestAR` | SUCCESS | ⏸ DEFERRED (下記) |
+| 4 | `TestCase4_SplitPerimeter_GuestPool_PullHostAR_Denied` | FAILURE | ⏸ DEFERRED (下記) |
 
 ## 機密情報の取り扱い
 
