@@ -1,9 +1,25 @@
-output "project_id" {
-  value = var.project_id
+output "base_project_id" {
+  value = google_project.base.project_id
 }
 
-output "project_number" {
-  value = data.google_project.main.number
+output "base_project_number" {
+  value = google_project.base.number
+}
+
+output "guest_a_project_id" {
+  value = google_project.guest_a.project_id
+}
+
+output "guest_a_project_number" {
+  value = google_project.guest_a.number
+}
+
+output "guest_b_project_id" {
+  value = google_project.guest_b.project_id
+}
+
+output "guest_b_project_number" {
+  value = google_project.guest_b.number
 }
 
 output "region" {
@@ -38,8 +54,12 @@ output "build_output_repo" {
   value = google_artifact_registry_repository.build_output.repository_id
 }
 
-output "perimeter_name" {
+output "perimeter_a_name" {
   value = google_access_context_manager_service_perimeter.main.name
+}
+
+output "perimeter_b_name" {
+  value = google_access_context_manager_service_perimeter.secondary.name
 }
 
 output "access_policy_name" {

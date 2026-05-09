@@ -30,7 +30,12 @@ resource "google_access_context_manager_service_perimeter" "main" {
   perimeter_type = "PERIMETER_TYPE_REGULAR"
 
   status {
-    resources           = ["projects/${data.google_project.main.number}"]
+    # Perimeter A: base (Cloud Build mainline + Shared VPC host を兼ねる) + guest_a。
+    # guest_b だけ Perimeter B 側に置く (境界分離検証 Case 4)。
+    resources = [
+      "projects/${google_project.base.number}",
+      "projects/${google_project.guest_a.number}",
+    ]
     restricted_services = var.perimeter_restricted_services
 
     vpc_accessible_services {
@@ -40,6 +45,52 @@ resource "google_access_context_manager_service_perimeter" "main" {
 
     # var.ingress_identities (terraform.tfvars で外注) を Ingress 許可。
     # 「access_level = *」「service_name = *」で any に倒す（検証目的）。
+    ingress_policies {
+      ingress_from {
+        identities = var.ingress_identities
+
+        sources {
+          access_level = "*"
+        }
+      }
+
+      ingress_to {
+        resources = ["*"]
+
+        operations {
+          service_name = "*"
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.enabled,
+  ]
+}
+
+# ──────────────────────────────────────────────
+# Perimeter B: Case 4 (境界分離) 専用。 guest-b のみ resources に持つ。
+# host-b は Perimeter A 側に居るので、 pool が居る guest-b 側だけ
+# Perimeter B で保護される構図になる。
+# ──────────────────────────────────────────────
+
+resource "google_access_context_manager_service_perimeter" "secondary" {
+  parent = "accessPolicies/${google_access_context_manager_access_policy.folder.name}"
+  name   = "accessPolicies/${google_access_context_manager_access_policy.folder.name}/servicePerimeters/cb_pp_b_${local.suffix}"
+  title  = "cb-pp-b-${local.suffix}"
+
+  perimeter_type = "PERIMETER_TYPE_REGULAR"
+
+  status {
+    resources           = ["projects/${google_project.guest_b.number}"]
+    restricted_services = var.perimeter_restricted_services
+
+    vpc_accessible_services {
+      enable_restriction = true
+      allowed_services   = var.perimeter_restricted_services
+    }
+
     ingress_policies {
       ingress_from {
         identities = var.ingress_identities

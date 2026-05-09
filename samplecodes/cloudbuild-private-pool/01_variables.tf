@@ -1,5 +1,10 @@
 variable "project_id" {
-  description = "VPC-SC 境界に入れる検証用プロジェクトの ID。terraform.tfvars (gitignored) で指定する"
+  description = <<EOT
+Terraform 実行 (= API call) の billing / quota project として使う既存プロジェクト
+の ID。検証用のリソースは別途 google_project.base で新規作成し、 各 project に
+配置する。本変数は API quota の請求先のみに使う。
+terraform.tfvars (gitignored) で指定する。
+EOT
   type        = string
 }
 
@@ -23,6 +28,16 @@ variable "region" {
   description = "GCP リージョン"
   type        = string
   default     = "asia-northeast1"
+}
+
+variable "billing_account" {
+  description = <<EOT
+新規 project に紐付ける Billing Account ID (XXXXXX-XXXXXX-XXXXXX)。
+host-a / guest-a / host-b / guest-b の作成 + billing 紐付けに使う。
+terraform.tfvars (gitignored) でのみ指定する。
+EOT
+  type        = string
+  sensitive   = true
 }
 
 variable "ingress_identities" {
