@@ -65,3 +65,20 @@ output "perimeter_b_name" {
 output "access_policy_name" {
   value = google_access_context_manager_access_policy.folder.name
 }
+
+# Stage 2a: Case 1 (peering なし) / Case 2b (ip_range 省略) 用の追加出力
+output "nopeer_pool_id" {
+  value = google_cloudbuild_worker_pool.nopeer.id
+}
+
+output "nopeer_network_name" {
+  value = google_compute_network.nopeer.name
+}
+
+output "defrange_pool_id" {
+  value = google_cloudbuild_worker_pool.defrange.id
+}
+
+output "defrange_network_name" {
+  value = google_compute_network.defrange.name
+}
