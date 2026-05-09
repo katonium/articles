@@ -28,14 +28,12 @@ flowchart TB
     subgraph Folder["Folder"]
 
       subgraph PA["Service Perimeter A"]
-        P0["scc-test-project-495010<br/>(ベース検証)"]
-        P1["shared-vpc-host-a<br/>(Shared VPC host)"]
-        P2["shared-vpc-guest-a<br/>(Shared VPC service project)"]
-        P3["shared-vpc-host-b<br/>(Shared VPC host, Case 5用)"]
+        P0["base<br/>(Cloud Build mainline + Shared VPC host)"]
+        P2["guest_a<br/>(Shared VPC service project, host=base)"]
       end
 
       subgraph PB["Service Perimeter B"]
-        P4["shared-vpc-guest-b<br/>(Shared VPC service project, Case 5用)"]
+        P4["guest_b<br/>(Shared VPC service project, host=base)"]
       end
 
     end
@@ -51,9 +49,9 @@ flowchart TB
 - **folder-scoped Access Policy**: `parent = organizations/<ORG_ID>`,
   `scopes = ["folders/<FOLDER_ID>"]`。組織全体ではなくフォルダ単位に閉じる。
   実値は `terraform.tfvars` で渡し、コードや README には記載しない。
-- **Perimeter A**: ベース project + Shared VPC host-a/guest-a + host-b の 4 projects。
+- **Perimeter A**: `base` (Cloud Build mainline + Shared VPC host) + `guest_a` の 2 projects。
   メインの検証パスはここに集約。
-- **Perimeter B**: guest-b のみ。Case 5 の境界分離検証専用。
+- **Perimeter B**: `guest_b` のみ。Case 4 の境界分離検証専用。
 - **Ingress policy**: 両 perimeter とも `user:<管理者メアド>` を identity として
   許可 (Terraform apply / 開発者操作のため)。
   `source.access_level = "*"` / `service_name = "*"` で any。
@@ -62,11 +60,9 @@ flowchart TB
 
 | project | 役割 | 所属 perimeter | VPC | Private Pool | 主に使う Case |
 |---|---|---|---|---|---|
-| `scc-test-project-495010` (既存) | ベース検証 | A | 自プロジェクト VPC | `pool-base` (peering 有), `pool-noPeering` (peering 無, Case 1), `pool-defaultRange` (peered_network_ip_range 省略, Case 2b) | 0, 1, 2a, 2b |
-| `shared-vpc-host-a` | Shared VPC host | A | `host-vpc-a` (Shared 公開) | なし (host には pool を置かない、 Case 4 用に追加で置く) | 3, 4 |
-| `shared-vpc-guest-a` | Shared VPC service project (host-a の VPC を借用) | A | host-a の VPC を借用 | `pool-guest-a` (Case 3用) / `pool-host-a` (host-a 上、Case 4用) | 3, 4 |
-| `shared-vpc-host-b` | Shared VPC host | A | `host-vpc-b` | なし | 5 |
-| `shared-vpc-guest-b` | Shared VPC service project (host-b の VPC を借用) | **B** | host-b の VPC を借用 | `pool-guest-b` | 5 |
+| `base` (`cbvpcsc-host-<suffix>`) | Cloud Build mainline + Shared VPC host | A | 自 project VPC (Case 0/1/2 用) + Shared 公開 host VPC (Case 3/4 用) | `pool-base` (peering 有), `pool-noPeering` (peering 無, Case 1), `pool-defaultRange` (peered_network_ip_range 省略, Case 2b) | 0, 1, 2a, 2b |
+| `guest_a` (`cbvpcsc-guesta2-<suffix>`) | Shared VPC service project (host=base) / Case 3 用 pool | A | base の host VPC を借用 | `pool-guest-a` (Case 3 用) | 3 |
+| `guest_b` (`cbvpcsc-guest-b-<suffix>`) | Shared VPC service project (host=base) / Case 4 用 pool | **B** | base の host VPC を借用 | `pool-guest-b` (Case 4 用) | 4 |
 
 ### Artifact Registry
 
@@ -85,7 +81,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   subgraph PA["Service Perimeter A"]
-    subgraph P0["scc-test-project-495010"]
+    subgraph P0["base"]
       VPC[(VPC)]
       Pool["Private Pool<br/>(no_external_ip)"]
       AR_DH["AR DockerHub mirror"]
@@ -113,7 +109,7 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph PA["Service Perimeter A"]
-    subgraph P0["scc-test-project-495010"]
+    subgraph P0["base"]
       VPC2[(VPC #2)]
       Pool2["Private Pool #2<br/>(peering 未設定)"]
       AR_DH2["AR DockerHub mirror"]
@@ -134,7 +130,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  subgraph P0["scc-test-project-495010"]
+  subgraph P0["base"]
     VPC3[(VPC #3)]
     SN["Service Networking connection<br/>(reserved range 無で作成試行)"]
     SN -. fail .-> VPC3
@@ -153,7 +149,7 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph PA["Service Perimeter A"]
-    subgraph P0["scc-test-project-495010"]
+    subgraph P0["base"]
       VPC4[(VPC + reserved /20)]
       Pool4["Private Pool<br/>(peered_network_ip_range 省略)"]
       AR_DH["AR DockerHub mirror"]
@@ -175,11 +171,11 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph PA["Service Perimeter A"]
-    subgraph Host["shared-vpc-host-a"]
+    subgraph Host["base (Shared VPC host)"]
       HostVPC[(Host VPC)]
       HostAR["AR (host 側)"]
     end
-    subgraph Guest["shared-vpc-guest-a"]
+    subgraph Guest["guest_a"]
       GPool["Private Pool"]
       GuestAR["AR (guest 側)"]
     end
@@ -203,13 +199,13 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph PA["Service Perimeter A"]
-    subgraph HostB["shared-vpc-host-b"]
+    subgraph HostB["base (Shared VPC host, Perimeter A)"]
       HostBVPC[(Host VPC)]
       HostBAR["AR (host)"]
     end
   end
   subgraph PB["Service Perimeter B (Ingress * / Egress *)"]
-    subgraph GuestB["shared-vpc-guest-b"]
+    subgraph GuestB["guest_b"]
       GBPool["Private Pool"]
       GuestBAR["AR (guest)"]
     end
@@ -237,17 +233,15 @@ samplecodes/cloudbuild-private-pool/
 ├── README.md                      # 本ファイル
 ├── 00_providers.tf                # google + google-beta provider
 ├── 01_variables.tf
-├── 02_apis.tf
 ├── 03_vpc-sc.tf                   # Access Policy + Perimeter A + Perimeter B
-├── 04_projects.tf                 # 新規 project (host-a/guest-a/host-b/guest-b)
-├── 05_vpc-base.tf                 # Case 0/1/2a/2b 用 (scc-test-project-495010)
-├── 06_vpc-shared-a.tf             # Case 3/4 用 Shared VPC (host-a + guest-a)
-├── 07_vpc-shared-b.tf             # Case 5 用 Shared VPC (host-b + guest-b)
-├── 08_artifact_registry.tf        # 各 project の AR repo + vpcsc_config
-├── 09_cloudbuild.tf               # 各 pool (base / noPeering / defaultRange / shared-a / shared-b)
-├── 10_iam.tf
-├── 11_outputs.tf
-├── private_pool_test.go           # Case 0..5 を Go test で
+├── 04_projects.tf                 # 新規 project (base / guest_a / guest_b)
+├── 04_vpc.tf                      # base 上の VPC (Case 0/1/2 用)
+├── 05_artifact_registry.tf        # 各 project の AR repo + vpcsc_config
+├── 06_cloudbuild.tf               # base 上の pool (base / noPeering / defaultRange)
+├── 07_iam.tf
+├── 08_outputs.tf
+├── 99_moved.tf                    # state migration 用 moved block
+├── private_pool_test.go           # Case 0..4 を Go test で
 ├── Makefile
 ├── terraform.tfvars.example
 └── .gitignore
@@ -346,7 +340,7 @@ flowchart LR
     XVM -.in.-> XVPC
   end
   subgraph PA["Perimeter A (境界内)"]
-    subgraph Inside["scc-test-project-495010"]
+    subgraph Inside["base"]
       InsideVPC[(VPC)]
       InsideAR["AR (境界内)"]
     end
