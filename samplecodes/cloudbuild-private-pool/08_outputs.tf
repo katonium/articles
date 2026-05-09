@@ -82,3 +82,49 @@ output "defrange_pool_id" {
 output "defrange_network_name" {
   value = google_compute_network.defrange.name
 }
+
+# Stage 2b: Shared VPC + guest_a (Case 3) / guest_b (Case 4) 用の追加出力
+
+output "guest_a_pool_id" {
+  value = google_cloudbuild_worker_pool.guest_a.id
+}
+
+output "guest_a_build_sa_email" {
+  value = google_service_account.build_guest_a.email
+}
+
+output "guest_a_dockerhub_mirror_repo" {
+  value = google_artifact_registry_repository.guest_a_dockerhub_mirror.repository_id
+}
+
+output "guest_a_pypi_mirror_repo" {
+  value = google_artifact_registry_repository.guest_a_pypi_mirror.repository_id
+}
+
+output "guest_a_build_output_repo" {
+  value = google_artifact_registry_repository.guest_a_build_output.repository_id
+}
+
+output "guest_b_pool_id" {
+  value = google_cloudbuild_worker_pool.guest_b.id
+}
+
+output "guest_b_build_sa_email" {
+  value = google_service_account.build_guest_b.email
+}
+
+output "guest_b_dockerhub_mirror_repo" {
+  value = google_artifact_registry_repository.guest_b_dockerhub_mirror.repository_id
+}
+
+output "guest_b_pypi_mirror_repo" {
+  value = google_artifact_registry_repository.guest_b_pypi_mirror.repository_id
+}
+
+output "guest_b_build_output_repo" {
+  value = google_artifact_registry_repository.guest_b_build_output.repository_id
+}
+
+output "shared_subnet_name" {
+  value = google_compute_subnetwork.shared.name
+}
