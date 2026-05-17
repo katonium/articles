@@ -10,7 +10,7 @@
 # ──────────────────────────────────────────────
 
 resource "google_compute_shared_vpc_host_project" "base" {
-  project = google_project.base.project_id
+  project = data.google_project.base.project_id
 
   depends_on = [google_project_service.enabled]
 }
@@ -38,7 +38,7 @@ resource "google_compute_shared_vpc_service_project" "guest_b" {
 
 resource "google_compute_subnetwork" "shared" {
   name                     = "cb-pp-shared-${local.suffix}"
-  project                  = google_project.base.project_id
+  project                  = data.google_project.base.project_id
   region                   = var.region
   network                  = google_compute_network.main.id
   ip_cidr_range            = "10.50.0.0/24"

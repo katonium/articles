@@ -9,13 +9,8 @@
 # project_id は global unique なので suffix で衝突回避。 billing は tfvars 経由。
 # ──────────────────────────────────────────────
 
-resource "google_project" "base" {
-  name                = "VPC-SC CB base shared VPC host"
-  project_id          = "cbvpcsc-host-${local.suffix}"
-  folder_id           = var.folder_id
-  billing_account     = var.billing_account
-  auto_create_network = false
-  deletion_policy     = "DELETE"
+data "google_project" "base" {
+  project_id = var.base_project_id
 }
 
 resource "google_project" "guest_a" {
@@ -55,7 +50,7 @@ locals {
   ]
 
   all_projects = {
-    base    = google_project.base
+    base    = data.google_project.base
     guest_a = google_project.guest_a
     guest_b = google_project.guest_b
   }

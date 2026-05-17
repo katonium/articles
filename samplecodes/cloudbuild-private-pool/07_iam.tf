@@ -6,7 +6,7 @@
 # ──────────────────────────────────────────────
 
 resource "google_service_account" "build" {
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   account_id   = "cb-build-sa-${local.suffix}"
   display_name = "Cloud Build job SA (VPC-SC verify)"
 }
@@ -19,14 +19,14 @@ resource "google_service_account_iam_member" "agent_act_as_build_sa" {
 }
 
 resource "google_project_iam_member" "build_sa_log_writer" {
-  project = google_project.base.project_id
+  project = data.google_project.base.project_id
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.build.email}"
 }
 
 # DockerHub mirror / PyPI mirror から pull するための reader
 resource "google_artifact_registry_repository_iam_member" "build_sa_reader_dockerhub" {
-  project    = google_project.base.project_id
+  project    = data.google_project.base.project_id
   location   = google_artifact_registry_repository.dockerhub_mirror.location
   repository = google_artifact_registry_repository.dockerhub_mirror.name
   role       = "roles/artifactregistry.reader"
@@ -37,7 +37,7 @@ resource "google_artifact_registry_repository_iam_member" "build_sa_reader_docke
 # Cloud Build Service Agent (P4SA) の credential で pull する。よって P4SA
 # にも mirror の reader 権限が必要。
 resource "google_artifact_registry_repository_iam_member" "p4sa_reader_dockerhub" {
-  project    = google_project.base.project_id
+  project    = data.google_project.base.project_id
   location   = google_artifact_registry_repository.dockerhub_mirror.location
   repository = google_artifact_registry_repository.dockerhub_mirror.name
   role       = "roles/artifactregistry.reader"
@@ -45,7 +45,7 @@ resource "google_artifact_registry_repository_iam_member" "p4sa_reader_dockerhub
 }
 
 resource "google_artifact_registry_repository_iam_member" "build_sa_reader_pypi" {
-  project    = google_project.base.project_id
+  project    = data.google_project.base.project_id
   location   = google_artifact_registry_repository.pypi_mirror.location
   repository = google_artifact_registry_repository.pypi_mirror.name
   role       = "roles/artifactregistry.reader"
@@ -54,7 +54,7 @@ resource "google_artifact_registry_repository_iam_member" "build_sa_reader_pypi"
 
 # build-output に push するための writer
 resource "google_artifact_registry_repository_iam_member" "build_sa_writer_output" {
-  project    = google_project.base.project_id
+  project    = data.google_project.base.project_id
   location   = google_artifact_registry_repository.build_output.location
   repository = google_artifact_registry_repository.build_output.name
   role       = "roles/artifactregistry.writer"

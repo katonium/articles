@@ -7,7 +7,7 @@
 
 resource "google_cloudbuild_worker_pool" "main" {
   name     = "private-pool-${local.suffix}"
-  project  = google_project.base.project_id
+  project  = data.google_project.base.project_id
   location = var.region
 
   worker_config {

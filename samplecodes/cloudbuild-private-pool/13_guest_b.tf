@@ -135,7 +135,7 @@ resource "google_cloudbuild_worker_pool" "guest_b" {
   }
 
   network_config {
-    peered_network          = "projects/${google_project.base.project_id}/global/networks/${google_compute_network.main.name}"
+    peered_network          = "projects/${data.google_project.base.project_id}/global/networks/${google_compute_network.main.name}"
     peered_network_ip_range = "/29"
   }
 

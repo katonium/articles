@@ -9,14 +9,14 @@
 resource "google_compute_network" "main" {
   name                    = "cb-pp-${local.suffix}"
   auto_create_subnetworks = false
-  project                 = google_project.base.project_id
+  project                 = data.google_project.base.project_id
 
   depends_on = [google_project_service.enabled]
 }
 
 resource "google_compute_subnetwork" "main" {
   name                     = "cb-pp-subnet-${local.suffix}"
-  project                  = google_project.base.project_id
+  project                  = data.google_project.base.project_id
   region                   = var.region
   network                  = google_compute_network.main.id
   ip_cidr_range            = "10.10.0.0/24"
@@ -35,7 +35,7 @@ resource "google_compute_subnetwork" "main" {
 
 resource "google_compute_firewall" "deny_all_egress" {
   name      = "cb-pp-deny-egress-${local.suffix}"
-  project   = google_project.base.project_id
+  project   = data.google_project.base.project_id
   network   = google_compute_network.main.id
   direction = "EGRESS"
   priority  = 65534
@@ -49,7 +49,7 @@ resource "google_compute_firewall" "deny_all_egress" {
 
 resource "google_compute_firewall" "allow_restricted_googleapis" {
   name      = "cb-pp-allow-rgapi-${local.suffix}"
-  project   = google_project.base.project_id
+  project   = data.google_project.base.project_id
   network   = google_compute_network.main.id
   direction = "EGRESS"
   priority  = 1000
@@ -64,7 +64,7 @@ resource "google_compute_firewall" "allow_restricted_googleapis" {
 
 resource "google_compute_firewall" "allow_internal_egress" {
   name      = "cb-pp-allow-internal-${local.suffix}"
-  project   = google_project.base.project_id
+  project   = data.google_project.base.project_id
   network   = google_compute_network.main.id
   direction = "EGRESS"
   priority  = 1000
@@ -85,7 +85,7 @@ resource "google_compute_firewall" "allow_internal_egress" {
 
 resource "google_dns_managed_zone" "googleapis" {
   name        = "googleapis-${local.suffix}"
-  project     = google_project.base.project_id
+  project     = data.google_project.base.project_id
   dns_name    = "googleapis.com."
   description = "Route googleapis.com to restricted VIP for VPC-SC"
   visibility  = "private"
@@ -100,7 +100,7 @@ resource "google_dns_managed_zone" "googleapis" {
 }
 
 resource "google_dns_record_set" "googleapis_restricted_a" {
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   managed_zone = google_dns_managed_zone.googleapis.name
   name         = "restricted.googleapis.com."
   type         = "A"
@@ -109,7 +109,7 @@ resource "google_dns_record_set" "googleapis_restricted_a" {
 }
 
 resource "google_dns_record_set" "googleapis_wildcard_cname" {
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   managed_zone = google_dns_managed_zone.googleapis.name
   name         = "*.googleapis.com."
   type         = "CNAME"
@@ -119,7 +119,7 @@ resource "google_dns_record_set" "googleapis_wildcard_cname" {
 
 resource "google_dns_managed_zone" "pkg_dev" {
   name        = "pkg-dev-${local.suffix}"
-  project     = google_project.base.project_id
+  project     = data.google_project.base.project_id
   dns_name    = "pkg.dev."
   description = "Route pkg.dev to restricted VIP for Artifact Registry"
   visibility  = "private"
@@ -134,7 +134,7 @@ resource "google_dns_managed_zone" "pkg_dev" {
 }
 
 resource "google_dns_record_set" "pkg_dev_a" {
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   managed_zone = google_dns_managed_zone.pkg_dev.name
   name         = "pkg.dev."
   type         = "A"
@@ -143,7 +143,7 @@ resource "google_dns_record_set" "pkg_dev_a" {
 }
 
 resource "google_dns_record_set" "pkg_dev_wildcard_cname" {
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   managed_zone = google_dns_managed_zone.pkg_dev.name
   name         = "*.pkg.dev."
   type         = "CNAME"
@@ -157,7 +157,7 @@ resource "google_dns_record_set" "pkg_dev_wildcard_cname" {
 
 resource "google_compute_global_address" "worker_range" {
   name          = "cb-pp-worker-${local.suffix}"
-  project       = google_project.base.project_id
+  project       = data.google_project.base.project_id
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
   prefix_length = 24

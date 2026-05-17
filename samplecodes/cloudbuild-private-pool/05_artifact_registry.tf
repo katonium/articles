@@ -13,7 +13,7 @@
 # ──────────────────────────────────────────────
 
 resource "google_artifact_registry_repository" "dockerhub_mirror" {
-  project       = google_project.base.project_id
+  project       = data.google_project.base.project_id
   location      = var.region
   repository_id = "dockerhub-mirror"
   description   = "Docker Hub remote mirror for VPC-SC verification"
@@ -31,7 +31,7 @@ resource "google_artifact_registry_repository" "dockerhub_mirror" {
 }
 
 resource "google_artifact_registry_repository" "pypi_mirror" {
-  project       = google_project.base.project_id
+  project       = data.google_project.base.project_id
   location      = var.region
   repository_id = "pypi-mirror"
   description   = "PyPI remote mirror for VPC-SC verification"
@@ -61,7 +61,7 @@ resource "google_artifact_registry_repository" "pypi_mirror" {
 
 resource "google_artifact_registry_vpcsc_config" "main" {
   provider     = google-beta
-  project      = google_project.base.project_id
+  project      = data.google_project.base.project_id
   location     = var.region
   vpcsc_policy = "ALLOW"
 
@@ -69,7 +69,7 @@ resource "google_artifact_registry_vpcsc_config" "main" {
 }
 
 resource "google_artifact_registry_repository" "build_output" {
-  project       = google_project.base.project_id
+  project       = data.google_project.base.project_id
   location      = var.region
   repository_id = "build-output-${local.suffix}"
   description   = "Standard Docker repo for build push verification"

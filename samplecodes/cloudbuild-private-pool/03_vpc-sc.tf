@@ -33,7 +33,7 @@ resource "google_access_context_manager_service_perimeter" "main" {
     # Perimeter A: base (Cloud Build mainline + Shared VPC host を兼ねる) + guest_a。
     # guest_b だけ Perimeter B 側に置く (境界分離検証 Case 4)。
     resources = [
-      "projects/${google_project.base.number}",
+      "projects/${data.google_project.base.number}",
       "projects/${google_project.guest_a.number}",
     ]
     restricted_services = var.perimeter_restricted_services

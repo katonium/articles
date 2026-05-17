@@ -1,9 +1,9 @@
 output "base_project_id" {
-  value = google_project.base.project_id
+  value = data.google_project.base.project_id
 }
 
 output "base_project_number" {
-  value = google_project.base.number
+  value = data.google_project.base.number
 }
 
 output "guest_a_project_id" {

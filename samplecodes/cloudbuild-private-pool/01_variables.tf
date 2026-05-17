@@ -1,8 +1,9 @@
 variable "project_id" {
   description = <<EOT
 Terraform 実行 (= API call) の billing / quota project として使う既存プロジェクト
-の ID。検証用のリソースは別途 google_project.base で新規作成し、 各 project に
-配置する。本変数は API quota の請求先のみに使う。
+の ID。検証用のリソースは base / guest_a / guest_b の各 project に配置する。
+base は data.google_project.base で既存プロジェクトを参照する (var.base_project_id)。
+本変数は API quota の請求先のみに使う。
 terraform.tfvars (gitignored) で指定する。
 EOT
   type        = string
@@ -10,6 +11,11 @@ EOT
 
 variable "folder_id" {
   description = "VPC-SC 境界をかけるフォルダの数値 ID。Access Policy / Service Perimeter は本フォルダにスコープされる"
+  type        = string
+}
+
+variable "base_project_id" {
+  description = "既存の base project ID (folder 配下にある既存プロジェクトを使う)。 terraform.tfvars (gitignored) で指定。"
   type        = string
 }
 
