@@ -1,0 +1,7 @@
+.terraform/
+# Catch all terraform state and timestamped backups (terraform.tfstate.<NN>.backup)
+terraform.tfstate*
+*.tfvars
+!terraform.tfvars.example
+test-report.html
+.env
