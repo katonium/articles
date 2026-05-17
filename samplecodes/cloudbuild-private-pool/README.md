@@ -217,33 +217,26 @@ flowchart LR
 
 **観点**: pool は guest 側 (perimeter B)、利用する VPC は host 側 (perimeter A)。Ingress / Egress を `*` で全許可しても、 VPC-SC の保護対象は project resource なので、 **pool が居る perimeter B に protected な resource (= guest AR)** 側にしか到達できない、という仮説の検証
 
-**期待 (仮説)**:
+**当初の仮説**:
 - guest pool → guest AR (同 perimeter B): 成功
 - guest pool → host AR (perimeter A): VPC-SC violation で失敗
 - 「pool が居る側」 が「境界内」 として優先される
 
-注: この期待が逆 (「VPC が居る側に通る」) の場合は新たな知見なので、結果に応じてREADMEを更新する。
+#### 実際に観察された挙動 (本実装での検証結果)
 
-#### 現状の知見 (本実装で部分的に確認済み)
+仮説より上位の壁が存在することがわかった:
 
-Case 4 のフル検証 (build job 投入) には到達していないが、 Terraform apply の
-段階で以下が観測された:
+- **cross-perimeter Shared VPC では Cloud Build Private Pool worker そのものが起動しない**
+- guest_b project (Perimeter B) に作った pool は base (Perimeter A) の Shared VPC を借用する構成。 build submit 自体は受理されるが、 worker が永久に **`QUEUED` のまま scheduled されない** (20 分以上待っても変化なし)。
+- 結果として、 guest_b pool から **guest_b 自身の AR (同 perimeter B 内)** にすらアクセスできない (worker が動かないため)。 当初の仮説 (cross-perimeter pull だけ deny) より厳しく、 **pool 自体が機能しない**ことが結論。
+- 「pool が居る側に通る / VPC が居る側に通る」 という細かい判定以前に、 **境界をまたいだ Shared VPC を Cloud Build Private Pool で使うことはできない**。
 
-- `google_compute_shared_vpc_service_project.guest_b` (host=base in Perimeter A,
-  service=guest_b in Perimeter B) の作成が **VPC-SC violation** で deny される
-  (`SECURITY_POLICY_VIOLATED` on `compute.googleapis.com`、 cross-perimeter API call)
-- つまり、 cross-perimeter で Shared VPC service association を結ぶこと自体が
-  VPC-SC で deny される。 仮説 (「pool が居る側にしか到達できない」) より上流の
-  setup 段階で deny されていた
+**段階的に発生する VPC-SC の壁**:
 
-**未到達の仮説検証 (deferred)**:
-- guest_b project の reactivation
-- Perimeter B から host (Perimeter A) compute API への Ingress policy 拡張
-- 上記が両方完了して初めて build job 投入の検証が可能
+1. **`google_compute_shared_vpc_service_project` の作成自体**: cross-perimeter (host=A, service=B) では `SECURITY_POLICY_VIOLATED` で deny される (= 最初に当たる壁)。 これは perimeter を一時的に退避するなどして強行作成は可能だが、 仮にできても次の壁にぶつかる。
+2. **作成できても build worker が起動しない**: 上記を回避して service association を作っても、 build を submit すると `QUEUED stuck` のまま worker が動かない (今回観察した壁)。
 
-実装上は Case 4 用 Terraform code (`13_guest_b.tf` の AR/pool/IAM、 `11_shared_vpc.tf`
-の guest_b service association) は残してある。 reactivate + Ingress 拡張後に
-再 apply で動作開始予定。
+**運用上の示唆**: Shared VPC で host と service project の VPC-SC 境界を分けると、 Cloud Build Private Pool は実用不能になる。 **host / service project は同一境界に揃える** のが必須。 境界分離する要件があるなら、 Shared VPC + Private Pool の組み合わせ自体を諦めて、 各境界に独立した Private Pool + VPC を立てる構成にする必要がある。
 
 ---
 
@@ -279,8 +272,8 @@ samplecodes/cloudbuild-private-pool/
 | 2b | `TestCase2b_DefaultPeeredRange_DockerBuildSucceeds` | SUCCESS | ✅ PASS |
 | 3 | `TestCase3_SharedVPC_GuestPool_PullGuestAR` | SUCCESS | ✅ PASS |
 | 3 (cross-AR) | `TestCase3_SharedVPC_GuestPool_PullHostAR` | SUCCESS | ⏸ 未実装 (追加検証候補) |
-| 4 | `TestCase4_SplitPerimeter_GuestPool_PullGuestAR` | SUCCESS | ⏸ DEFERRED (下記) |
-| 4 | `TestCase4_SplitPerimeter_GuestPool_PullHostAR_Denied` | FAILURE | ⏸ DEFERRED (下記) |
+| 4 | `TestCase4_SplitPerimeter_GuestPool_PullGuestAR` | NOT SUCCESS (worker QUEUED stuck or FAILURE) | ✅ PASS (期待通り cross-perim Shared VPC で worker 起動せず) |
+| 4 | `TestCase4_SplitPerimeter_GuestPool_PullHostAR_Denied` | NOT SUCCESS | ✅ PASS |
 
 ## 機密情報の取り扱い
 

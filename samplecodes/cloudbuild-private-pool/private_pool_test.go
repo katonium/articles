@@ -37,6 +37,14 @@ type tfOutput struct {
 	GuestADockerhubMirror string
 	GuestAPyPIMirror      string
 	GuestABuildOutputRepo string
+
+	// Case 4 (guest_b / Split Perimeter)
+	GuestBProjectID       string
+	GuestBPoolID          string
+	GuestBBuildSAEmail    string
+	GuestBDockerhubMirror string
+	GuestBPyPIMirror      string
+	GuestBBuildOutputRepo string
 }
 
 func getTerraformOutputs(t *testing.T) *tfOutput {
@@ -92,6 +100,13 @@ func getTerraformOutputs(t *testing.T) *tfOutput {
 		GuestADockerhubMirror: getString("guest_a_dockerhub_mirror_repo"),
 		GuestAPyPIMirror:      getString("guest_a_pypi_mirror_repo"),
 		GuestABuildOutputRepo: getString("guest_a_build_output_repo"),
+
+		GuestBProjectID:       getString("guest_b_project_id"),
+		GuestBPoolID:          getString("guest_b_pool_id"),
+		GuestBBuildSAEmail:    getString("guest_b_build_sa_email"),
+		GuestBDockerhubMirror: getString("guest_b_dockerhub_mirror_repo"),
+		GuestBPyPIMirror:      getString("guest_b_pypi_mirror_repo"),
+		GuestBBuildOutputRepo: getString("guest_b_build_output_repo"),
 	}
 }
 
@@ -446,4 +461,119 @@ func TestCase3_SharedVPC_GuestPool_PullGuestAR(t *testing.T) {
 			res.Status, res.LogURL, res.BuildID)
 	}
 	t.Logf("guest_a pool でビルド成功 build_id=%s log=%s", res.BuildID, res.LogURL)
+}
+
+// ──────────────────────────────────────────────
+// Case 4: 境界分離 (Split Perimeter) — guest_b pool で guest_b 自身の AR を pull (実測: 失敗)
+//
+// 当初の仮説:
+//   guest_b は Perimeter B (separate perimeter)。 guest_b_pool / guest_b_build_sa /
+//   guest_b の AR mirror & build-output はすべて Perimeter B 配下にあり、
+//   同一境界内アクセスなので Ingress 不要で通る → SUCCESS するはず。
+//
+// 観測された実際の挙動:
+//   cross-perim Shared VPC では pool worker が起動できず QUEUED stuck になる。
+//   build submit 自体は受理されるが、 worker が永久に scheduled されず、
+//   20 分以上待っても build は QUEUED のまま動かない。 その結果として、
+//   同 perim B 内の AR アクセスすら成立しない (worker そのものが動かないため)。
+//   つまり「個別 deny」ではなく「worker pool が機能しない」という上位の壁が
+//   cross-perimeter Shared VPC で発生する。
+//
+// 現在の期待:
+//   ビルドは SUCCESS しない (QUEUED stuck → op.Wait timeout、 または FAILURE)。
+// ──────────────────────────────────────────────
+
+func TestCase4_SplitPerimeter_GuestPool_PullGuestAR(t *testing.T) {
+	ctx := context.Background()
+	o := getTerraformOutputs(t)
+
+	script, _ := dockerBuildScript(
+		o.Region,
+		o.GuestBProjectID,
+		o.GuestBDockerhubMirror,
+		o.GuestBPyPIMirror,
+		o.GuestBBuildOutputRepo,
+		o.Suffix+"-guestb",
+	)
+
+	steps := []*cloudbuildpb.BuildStep{
+		{
+			Id:         "guestb-build-via-mirrors-and-push",
+			Name:       "gcr.io/cloud-builders/docker",
+			Entrypoint: "bash",
+			Args:       []string{"-c", script},
+		},
+	}
+
+	opts := &buildSubmitOpts{
+		ProjectID:      o.GuestBProjectID,
+		Region:         o.Region,
+		WorkerPoolID:   o.GuestBPoolID,
+		BuildSAEmail:   o.GuestBBuildSAEmail,
+		BuildSAProject: o.GuestBProjectID,
+		// cross-perim Shared VPC では worker が起動しないことが既知。
+		// 15 min も待つ必要が無いので、 build timeout を短くして高速に終わらせる
+		// (op.Wait は +5min wrap するので合計 ~10 min cap)。
+		Timeout: 5 * time.Minute,
+	}
+
+	res := submitBuildWith(t, ctx, opts, steps)
+	if res.Status == cloudbuildpb.Build_SUCCESS {
+		t.Fatalf("cross-perim Shared VPC で worker が動作するはずがないが SUCCESS した status=%s log=%s build_id=%s",
+			res.Status, res.LogURL, res.BuildID)
+	}
+	t.Logf("期待通り cross-perim Shared VPC で worker 起動せず status=%s build_id=%s log=%s",
+		res.Status, res.BuildID, res.LogURL)
+}
+
+// ──────────────────────────────────────────────
+// Case 4: 境界分離 (Split Perimeter) — guest_b pool から host (base) AR を pull (negative)
+//
+// 検証内容:
+//   guest_b は Perimeter B、 base AR は Perimeter A。 cross-perimeter アクセスは
+//   VPC-SC で deny されるはず (Ingress policy も guest_b の build SA は持っていない)。
+// 期待:
+//   ビルド NOT SUCCESS。 deny 原因は VPC-SC または IAM のどちらでも OK。
+// ──────────────────────────────────────────────
+
+func TestCase4_SplitPerimeter_GuestPool_PullHostAR_Denied(t *testing.T) {
+	ctx := context.Background()
+	o := getTerraformOutputs(t)
+
+	// build script は base project の AR mirror / build-output を指す。
+	// pool / build SA は guest_b 側 → cross-perimeter (Perimeter B → Perimeter A) になる。
+	script, _ := dockerBuildScript(
+		o.Region,
+		o.ProjectID,
+		o.DockerHubMirror,
+		o.PyPIMirror,
+		o.BuildOutputRepo,
+		o.Suffix+"-guestb-x",
+	)
+
+	steps := []*cloudbuildpb.BuildStep{
+		{
+			Id:         "guestb-pull-host-ar-should-fail",
+			Name:       "gcr.io/cloud-builders/docker",
+			Entrypoint: "bash",
+			Args:       []string{"-c", script},
+		},
+	}
+
+	opts := &buildSubmitOpts{
+		ProjectID:      o.GuestBProjectID,
+		Region:         o.Region,
+		WorkerPoolID:   o.GuestBPoolID,
+		BuildSAEmail:   o.GuestBBuildSAEmail,
+		BuildSAProject: o.GuestBProjectID,
+		// cross-perimeter は失敗確定なので短めに切り上げ
+		Timeout: 5 * time.Minute,
+	}
+
+	res := submitBuildWith(t, ctx, opts, steps)
+	if res.Status == cloudbuildpb.Build_SUCCESS {
+		t.Fatalf("cross-perimeter pull が成功してしまった (失敗するべき) log=%s build_id=%s",
+			res.LogURL, res.BuildID)
+	}
+	t.Logf("期待通り cross-perimeter pull は失敗 status=%s build_id=%s", res.Status, res.BuildID)
 }
