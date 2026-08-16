@@ -1,0 +1,30 @@
+# コピーして terraform.tfvars に保存し、実値を入れて使う。
+# terraform.tfvars は .gitignore で除外されており、コミットされない。
+#
+# このモジュールは cloudbuild-private-pool 側で先に構築済みの
+# base / guest_a / guest_b プロジェクト + Shared VPC + Service Perimeter を
+# 再利用する。各値は ../cloudbuild-private-pool/terraform.tfvars と
+# `terraform output` の値を揃えて入れる。
+
+# API quota 請求先 (通常は base project と同じ)
+project_id = "REPLACE_WITH_PROJECT_ID"
+
+# cloudbuild-private-pool の output 値
+base_project_id    = "REPLACE_WITH_BASE_PROJECT_ID"
+guest_a_project_id = "REPLACE_WITH_GUEST_A_PROJECT_ID"
+guest_b_project_id = "REPLACE_WITH_GUEST_B_PROJECT_ID"
+suffix             = "REPLACE_WITH_SUFFIX_FROM_CLOUDBUILD_OUTPUT"
+perimeter_a_name   = "REPLACE_WITH_PERIMETER_A_FULL_NAME"
+perimeter_b_name   = "REPLACE_WITH_PERIMETER_B_FULL_NAME"
+
+# 組織 / フォルダ / Billing (cloudbuild-private-pool と同じ)
+folder_id       = "REPLACE_WITH_FOLDER_NUMBER"
+org_id          = "REPLACE_WITH_ORG_NUMBER"
+billing_account = "XXXXXX-XXXXXX-XXXXXX"
+
+region = "asia-northeast1"
+
+# Ingress ポリシーに登録されている identity (cloudbuild-private-pool と同じ)
+ingress_identities = [
+  "user:REPLACE_WITH_EMAIL",
+]

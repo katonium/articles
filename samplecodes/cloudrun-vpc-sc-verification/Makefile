@@ -17,7 +17,7 @@ test: check-tfvars
 
 report: check-tfvars
 	go test -v -timeout 1800s -json ./... | \
-		go-test-report -o test-report.html -t "VPC-SC Cloud Build Private Pool 仕様検証レポート"
+		go-test-report -o test-report.html -t "VPC-SC Cloud Run + VPC Connector 仕様検証レポート"
 
 destroy: check-tfvars
 	terraform destroy -auto-approve

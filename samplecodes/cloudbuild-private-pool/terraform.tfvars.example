@@ -1,1 +1,16 @@
-project_id = "your-gcp-project-id"
+# コピーして terraform.tfvars に保存し、実値を入れて使う。
+# terraform.tfvars は .gitignore で除外されており、コミットされない。
+# project_id / folder_id / ingress_identities はいずれも検証対象固有の値であり機密情報として扱う。
+
+project_id      = "REPLACE_WITH_PROJECT_ID"
+base_project_id = "REPLACE_WITH_EXISTING_BASE_PROJECT_ID"
+folder_id       = "REPLACE_WITH_FOLDER_NUMBER"
+org_id          = "REPLACE_WITH_ORG_NUMBER"
+billing_account = "XXXXXX-XXXXXX-XXXXXX"
+region          = "asia-northeast1"
+
+# Ingress ポリシーで許可する identity。例:
+#   ["user:alice@example.com", "serviceAccount:tf-runner@PROJECT.iam.gserviceaccount.com"]
+ingress_identities = [
+  "user:REPLACE_WITH_EMAIL",
+]
