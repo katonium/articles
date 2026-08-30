@@ -1,0 +1,45 @@
+# Beam YAML パイプライン: 日付付き CSV → BigQuery (全変換ステップをチェーン)
+#
+# yyyymmdd を Jinja 変数で渡せば明示パラメータモード (A)、
+# 渡さなければ launcher VM の datetime.datetime.now() で自動計算モード (B)。
+#
+# Note: gcloud dataflow yaml run は {# #} や {% %} のような Jinja ブロック構文を
+# YAML ファイルの先頭に置くと "yaml_pipeline must be a valid yaml" エラーで弾く。
+# そのため {% set %} ではなく {{ default() }} フィルタで inline に書く必要がある。
+# datetime モジュールは Beam YAML の Jinja コンテキストに公式に公開されている。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path_prefix }}/sample_{{ yyyymmdd | default(datetime.datetime.now().strftime('%Y%m%d')) }}.csv"
+
+    - type: Sql
+      name: DropColAndConvert
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    - type: Sql
+      name: FilterNulls
+      input: DropColAndConvert
+      config:
+        query: |
+          SELECT id, name, event_at_jst
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: Write
+      input: FilterNulls
+      config:
+        table: "{{ project }}.{{ dataset }}.csv_dated_{{ yyyymmdd | default(datetime.datetime.now().strftime('%Y%m%d')) }}_result"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

@@ -1,0 +1,46 @@
+# Beam YAML パイプライン: CSV → BigQuery (全変換ステップをチェーン)
+#
+# 1 つのパイプラインで 3 つの変換ステップを順番に通す:
+#   1. カラム削除 (secret を除外) + UTC→JST 変換
+#   2. NULL 行除去 (name IS NOT NULL)
+#   3. BigQuery に書き込み
+#
+# 最終出力: { id, name, event_at_jst } × 3 行 (name が非 NULL の行のみ)
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+
+    # Step 1: secret カラム削除 + event_at_utc を JST に変換
+    - type: Sql
+      name: DropColAndConvert
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    # Step 2: name が NULL の行を除去
+    - type: Sql
+      name: FilterNulls
+      input: DropColAndConvert
+      config:
+        query: |
+          SELECT id, name, event_at_jst
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: Write
+      input: FilterNulls
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

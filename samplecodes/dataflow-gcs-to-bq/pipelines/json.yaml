@@ -1,0 +1,38 @@
+# Beam YAML パイプライン: NDJSON → BigQuery (全変換ステップをチェーン)
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromJson
+      name: Read
+      config:
+        path: "{{ input_path }}"
+        lines: true
+
+    - type: Sql
+      name: DropColAndConvert
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    - type: Sql
+      name: FilterNulls
+      input: DropColAndConvert
+      config:
+        query: |
+          SELECT id, name, event_at_jst
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: Write
+      input: FilterNulls
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND

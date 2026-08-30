@@ -1,0 +1,42 @@
+# Beam YAML パイプライン: gzip 圧縮 CSV → BigQuery (全変換ステップをチェーン)
+#
+# ReadFromCsv の YAML ラッパーは compression パラメータを受け付けない
+# (ValueError: Invalid transform specification at "Read": compression)。
+# ただし pandas read_csv のデフォルト compression='infer' が .csv.gz 拡張子から
+# 自動判別するので、path に .csv.gz を指定するだけで透過的に読める。
+
+pipeline:
+  type: composite
+  transforms:
+    - type: ReadFromCsv
+      name: Read
+      config:
+        path: "{{ input_path }}"
+
+    - type: Sql
+      name: DropColAndConvert
+      input: Read
+      config:
+        query: |
+          SELECT
+            CAST(id AS BIGINT) AS id,
+            name,
+            TIMESTAMPADD(HOUR, 9, CAST(event_at_utc AS TIMESTAMP)) AS event_at_jst
+          FROM PCOLLECTION
+
+    - type: Sql
+      name: FilterNulls
+      input: DropColAndConvert
+      config:
+        query: |
+          SELECT id, name, event_at_jst
+          FROM PCOLLECTION
+          WHERE name IS NOT NULL
+
+    - type: WriteToBigQuery
+      name: Write
+      input: FilterNulls
+      config:
+        table: "{{ project }}.{{ dataset }}.{{ prefix }}_result"
+        create_disposition: CREATE_NEVER
+        write_disposition: WRITE_APPEND
